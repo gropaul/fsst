@@ -82,11 +82,11 @@ struct CutGraph {
     static CutGraph plain(const AlignmentGraph& g) { return CutGraph{g.edges, g.node_count(), g.source(), g.sink()}; }
 
     // Every node except source and sink is copied once per edge entering it,
-    // so a copy knows the symbol that led to it. A Point edge b out of a copy
-    // entered by Point a becomes two edges in series, Point(b) then Pair(a,
-    // b): a path through them is blocked by either, and the cut takes the
-    // cheaper. Paths are otherwise those of g, so every cut is still a sound
-    // cover.
+    // so a copy knows the symbol that led to it. A Point edge b, or a
+    // terminal Range of the one symbol b, out of a copy entered by Point a
+    // becomes two edges in series, the edge itself then Pair(a, b): a path
+    // through them is blocked by either, and the cut takes the cheaper.
+    // Paths are otherwise those of g, so every cut is still a sound cover.
     static CutGraph with_pairs(const AlignmentGraph& g, const Frequency& freq) {
         const size_t n = g.needle_len;
         std::vector<std::vector<size_t>> into(n + 1);
@@ -111,7 +111,8 @@ struct CutGraph {
                 for (size_t j = 0; j < into[e.from].size(); ++j)
                     copies.push_back({copy_id[e.from][j], &g.edges[into[e.from][j]]});
             for (auto [cu, entered_by] : copies) {
-                bool pairable = e.probe == Probe::Point && entered_by != nullptr && entered_by->probe == Probe::Point;
+                bool one_symbol = e.probe == Probe::Point || (e.probe == Probe::Range && e.range.begin == e.range.last);
+                bool pairable = one_symbol && entered_by != nullptr && entered_by->probe == Probe::Point;
                 if (!pairable) {
                     Edge copy = e;
                     copy.from = cu;
@@ -124,7 +125,7 @@ struct CutGraph {
                 point.from = cu;
                 point.to = mid;
                 cg.edges.push_back(std::move(point));
-                CodePair pair{entered_by->codes[0], e.codes[0]};
+                CodePair pair{entered_by->codes[0], e.probe == Probe::Point ? e.codes[0] : e.range.begin};
                 cg.edges.push_back(Edge{mid, target, Probe::Pair, 0, {}, CodeRange{0, 0}, pair, freq.pair_estimate(pair),
                                         0, 0, 1});
             }
