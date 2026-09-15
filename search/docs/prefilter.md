@@ -472,7 +472,17 @@ be the set entry there. With 256 FSST codes `EdgesByToken` is a `[256]`
 array of small lists.
 
 For FSST the walk as written reads a literal byte after 255 as a token and
-has no escape steps to follow. §9 has the fix.
+has no escape steps to follow. §9 has the fix, and `scan/walk/walk.hpp` is
+the port: `Node` holds one step, `Point(code, next)` or `Escape(byte,
+next)`, a 256-bit terminal set and `entry_len`; the steps of each code sit
+in a CSR table indexed by code, escape steps under 255 with their byte.
+`forward` also returns true the moment a step lands on the sink, which only
+an escape step does (a greedy step that would land there is left out in
+favour of the terminal set). Test oracle (`scan/walk/tests.cpp`): every
+unit of every row as the hit, expected true iff the unit overlaps an
+occurrence and is not an entry token of an unenumerated set. The weaker
+"any hit in the row" oracle let a needle ending in a literal pass through
+the marker hit while every token hit failed.
 
 ## 8. Everything else in the module
 
@@ -498,7 +508,7 @@ against the new structure:
 | `graph.rs` `build_alignment_graph` | `debug_assert frequencies.num_tokens() == dict.num_tokens()` | frequency array is `count[256]`; dictionary has ≤ 255 symbols |
 | `graph.rs` `greedy_in_needle`, `terminal_range`, `alignment_candidates` | sorted-dictionary binary searches, memmem sweep | linear scans over ≤ 255 symbols; a "range" is a code set; `from_runs` merges what happens to abut |
 | `walk.rs` `from_graph` | `Point` edges only between interior nodes | an escape edge becomes `greedy_step = Escape(byte, to)` on `nodes[o]` and `edges[255] += (o, o + 1)`; several escape edges share token 255 and the byte disambiguates |
-| `walk.rs` `forward` | one code per step | on `Escape(byte, next)`: need `codes[i] == 255 && i + 1 < row_end && codes[i + 1] == byte`, then `i += 2`; a 255 met on a unit boundary is always a marker |
+| `walk.rs` `forward` | one code per step | on `Escape(byte, next)`: need `codes[i] == 255 && i + 1 < row_end && codes[i + 1] == byte`, then `i += 2`; a 255 met on a unit boundary is always a marker; landing on the sink is success, since the escape edge into it has no terminal set standing in for it |
 | `walk.rs` `backward` | unit ending at `end - 1` is a token | if the run of 255s ending at `end - 2` is odd, the unit is the literal `codes[end - 1]` and only the escape edge into `node` with that byte can match; then `end -= 2` |
 | `walk.rs` `check` | every hit is a token | a hit at `i` whose preceding run of 255s is odd is a literal: skip it. A hit on code 255 with an even run before it is a marker: try the escape edges whose byte is `codes[i + 1]` |
 | `walk.rs` `NeedlePrefix` | u128 window, `MAX_TOKEN_SIZE` 16 | u64 `symbol[c]`, `len[c]`, `MAX_TOKEN_SIZE` 8 |
@@ -525,7 +535,10 @@ and for the policy `old: scan/novel/policy/tests.rs` (new has none):
   binary; needles of 1 byte to over 255 bytes; absent needles; the empty
   needle (`empty_pattern_appends_all_rows`); a non-empty needle with an empty
   cover (`empty_probe_cover_still_appends_nothing`);
-  `superset_verified_by_memmem_matches_the_walk`.
+  `superset_verified_by_memmem_matches_the_walk`. Port: `prefilter/tests.cpp`
+  compresses its rows with `fsst_create`/`fsst_compress`, checks the graph
+  invariants, the superset and the exact rows through the walk on URL text,
+  repetitive text, random bytes and text with escaped bytes inside the needle.
 - **Graph invariants** (`check_graph`): `from < to` on every edge; the sink
   is unreachable when the cut's edges are blocked; the cut never contains
   `SetTooBig`; `contained` and `first[k]` agree with the brute-force scan,
@@ -642,4 +655,4 @@ draws it.
 | frequency index | one counting pass over the stream at analysis time, not timed |
 | location | new sources under `search/` in this repo, C++17, library target |
 | raw codes | cover over raw codes, no permutation: a `Range` or `Set` edge holds its raw code set, `from_edge_cut` merges the runs, and the λ weight of an edge counts the runs its own codes merge to (`points + 2·ranges` of that edge alone) |
-| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis`, `analyze`, `superset_rows`, `MAX_PATTERN_LEN`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |
+| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, exact `candidate_rows`, `superset_rows`, `MAX_PATTERN_LEN`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |

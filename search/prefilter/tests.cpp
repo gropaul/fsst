@@ -200,6 +200,10 @@ static void check(const Column& col, const std::vector<std::string>& patterns) {
             CHECK_MSG(holds, "%s: row %zu emitted without a covered code", pat.c_str(), row);
         }
         if (!want.empty()) CHECK_MSG(!a.cover.empty(), "%s: empty cover with matching rows", pat.c_str());
+        std::vector<size_t> exact;
+        candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, exact);
+        CHECK_MSG(exact == want, "%s: the walk's rows differ from byte containment (%zu against %zu)", pat.c_str(),
+                  exact.size(), want.size());
     }
 }
 
@@ -320,6 +324,9 @@ static void false_zero_frequencies_cannot_hide_a_true_match() {
     superset_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), a, got);
     std::vector<size_t> want = rows_containing(col, pat);
     CHECK(std::includes(got.begin(), got.end(), want.begin(), want.end()));
+    std::vector<size_t> exact;
+    candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, exact);
+    CHECK(exact == want);
 }
 
 static void cover_probes_the_maximal_runs_of_its_membership() {

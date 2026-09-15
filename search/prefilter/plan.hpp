@@ -12,6 +12,7 @@
 #include "graph.hpp"
 #include "mincut.hpp"
 #include "scan/policy/policy.hpp"
+#include "scan/walk/walk.hpp"
 
 namespace fsst::search::prefilter {
 
@@ -19,6 +20,7 @@ struct Planned {
     ProbeCover cover;
     uint32_t covered;  // codes the cover matches in the indexed stream
     double scan_ns;
+    scan::Walk walk;
 };
 
 inline uint64_t weight_at(const Edge& e, uint64_t lambda) {
@@ -39,7 +41,7 @@ inline Planned cheapest_cover(const AlignmentGraph& graph, const Frequency& freq
         uint32_t covered = freq.of_cover(cover);
         double ns = scan::policy::scan_ns(cover, covered, region);
         if (!priced || ns < best.scan_ns) {
-            best = Planned{std::move(cover), covered, ns};
+            best = Planned{std::move(cover), covered, ns, {}};
             priced = true;
         }
     };
@@ -62,7 +64,9 @@ inline Planned cheapest_cover(const AlignmentGraph& graph, const Frequency& freq
 inline Planned plan(const Dictionary& dict, const uint8_t* pattern, size_t n, const Frequency& freq,
                     size_t row_count) {
     AlignmentGraph graph = build_alignment_graph(dict, pattern, n, freq);
-    return cheapest_cover(graph, freq, scan::policy::Region{freq.total, row_count});
+    Planned p = cheapest_cover(graph, freq, scan::policy::Region{freq.total, row_count});
+    p.walk = scan::Walk(graph, pattern);
+    return p;
 }
 
 }  // namespace fsst::search::prefilter

@@ -14,6 +14,10 @@ add_executable(prefilter_policy_tests prefilter/scan/policy/tests.cpp)
 target_link_libraries(prefilter_policy_tests fsst_search)
 add_test(NAME prefilter_policy COMMAND prefilter_policy_tests)
 
+add_executable(prefilter_walk_tests prefilter/scan/walk/tests.cpp)
+target_link_libraries(prefilter_walk_tests fsst_search)
+add_test(NAME prefilter_walk COMMAND prefilter_walk_tests)
+
 add_executable(prefilter_tests prefilter/tests.cpp)
 target_link_libraries(prefilter_tests fsst_search fsst)
 target_include_directories(prefilter_tests PRIVATE ${CMAKE_SOURCE_DIR})

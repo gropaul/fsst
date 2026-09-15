@@ -87,6 +87,8 @@ inline Candidates alignment_candidates(const Dictionary& dict, const uint8_t* ne
         size_t len = dict.length(code);
         for (size_t k = 1; k < kmax && k < len; ++k)
             if (std::memcmp(s + len - k, needle, k) == 0) c.record(k, static_cast<uint8_t>(code));
+        // A symbol starting with the needle is the terminal set's at offset 0.
+        if (len >= n && std::memcmp(s, needle, n) == 0) continue;
         for (size_t p = 1; p + n <= len; ++p)
             if (std::memcmp(s + p, needle, n) == 0) {
                 c.contained.push_back(static_cast<uint8_t>(code));
