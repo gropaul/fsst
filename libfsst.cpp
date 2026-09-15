@@ -383,7 +383,9 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
    size_t curLine, suffixLim = symbolTable.suffixLim;
    u8 byteLim = symbolTable.nSymbols + symbolTable.zeroTerminated - symbolTable.lenHisto[0];
 
-   u8 buf[512+8] = {}; /* +8 sentinel is to avoid 8-byte unaligned-loads going beyond 511 out-of-bounds */
+   // each string is copied whole, followed by the terminator and an 8-byte sentinel for the unaligned loads
+   u8 stackBuf[512+8] = {};
+   vector<u8> heapBuf;
 
    // three variants are possible. dead code falls away since the bool arguments are constants
    auto compressVariant = [&](bool noSuffixOpt, bool avoidBranch) {
@@ -421,32 +423,29 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
    };
 
    for(curLine=0; curLine<nlines; curLine++) {
-      size_t chunk, curOff = 0;
+      size_t len = lenIn[curLine];
       strOut[curLine] = out;
-      do {
-         cur = strIn[curLine] + curOff; 
-         chunk = lenIn[curLine] - curOff;
-         if (chunk > 511) {
-            chunk = 511; // we need to compress in chunks of 511 in order to be byte-compatible with simd-compressed FSST 
-         }
-         if ((2*chunk+7) > (size_t) (lim-out)) {
-            return curLine; // out of memory
-         }
-         // copy the string to the 511-byte buffer
-         memcpy(buf, cur, chunk);
-         buf[chunk] = (u8) symbolTable.terminator;
-         cur = buf;
-         end = cur + chunk; 
+      if ((2*len+7) > (size_t) (lim-out)) {
+         return curLine; // out of memory
+      }
+      u8 *buf = stackBuf;
+      if (len > 511) {
+         if (heapBuf.size() < len+9) heapBuf.assign(len+9, 0);
+         buf = heapBuf.data();
+      }
+      memcpy(buf, strIn[curLine], len);
+      buf[len] = (u8) symbolTable.terminator;
+      cur = buf;
+      end = cur + len;
 
-         // based on symboltable stats, choose a variant that is nice to the branch predictor
-         if (noSuffixOpt) {
-            compressVariant(true,false);
-         } else if (avoidBranch) {
-            compressVariant(false,true);
-         } else {
-          compressVariant(false, false);
-         }
-      } while((curOff += chunk) < lenIn[curLine]);
+      // based on symboltable stats, choose a variant that is nice to the branch predictor
+      if (noSuffixOpt) {
+         compressVariant(true,false);
+      } else if (avoidBranch) {
+         compressVariant(false,true);
+      } else {
+         compressVariant(false, false);
+      }
       lenOut[curLine] = (size_t) (out - strOut[curLine]);
    } 
    return curLine;
@@ -597,10 +596,7 @@ extern "C" u32 fsst_import(fsst_decoder_t *decoder, u8 const *buf) {
 
 // runtime check for simd
 inline size_t _compressImpl(Encoder *e, size_t nlines, const size_t lenIn[], const u8 *strIn[], size_t size, u8 *output, size_t *lenOut, u8 *strOut[], bool noSuffixOpt, bool avoidBranch, int simd) {
-#ifndef NONOPT_FSST
-   if (simd && fsst_hasAVX512())
-      return compressSIMD(*e->symbolTable, e->simdbuf, nlines, lenIn, strIn, size, output, lenOut, strOut, simd);
-#endif
+   // the AVX512 path parses strings in 511-byte chunks, which the search prefilter cannot follow; scalar only
    (void) simd;
    return compressBulk(*e->symbolTable, nlines, lenIn, strIn, size, output, lenOut, strOut, noSuffixOpt, avoidBranch);
 }
