@@ -385,6 +385,15 @@ scan_ns(cover, covered, region):
     total     = stage_one + stage_two + covered · 8.0
 ```
 
+`policy.hpp` carries the 2026-09-15 fit from §11 and the stage-two
+constants from the resolver sweep; its skip-flag pair (3.3, 3.4 ns per
+group) comes from the eq_or K = 1 ends of the same sweep, so the flag turns
+on below about 2e-4 bits per code. Its ladder: eq_or at K ≤ 2, nibble_n8k at
+3..8, nibble from 9; ranges alone to range up to R = 3; beside one token the
+compare carries two ranges; beside eight tokens the batch carries one.
+`policy/tests.cpp` pins those boundaries and runs every plan end to end
+against the scalar rows.
+
 Fitted `ns_per_code` for **u8 codes**, from old (the kernels are unchanged;
 K tokens, R ranges):
 
@@ -633,4 +642,4 @@ draws it.
 | frequency index | one counting pass over the stream at analysis time, not timed |
 | location | new sources under `search/` in this repo, C++17, library target |
 | raw codes | still open: cover as runs over raw codes with the λ weight counting raw runs, or a sorted permutation kept for the planner so a `Range` stays one cut term |
-| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`; tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt` |
+| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt` |

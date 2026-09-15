@@ -10,6 +10,10 @@ add_executable(prefilter_resolver_tests prefilter/scan/resolver/tests.cpp)
 target_link_libraries(prefilter_resolver_tests fsst_search)
 add_test(NAME prefilter_resolver COMMAND prefilter_resolver_tests)
 
+add_executable(prefilter_policy_tests prefilter/scan/policy/tests.cpp)
+target_link_libraries(prefilter_policy_tests fsst_search)
+add_test(NAME prefilter_policy COMMAND prefilter_policy_tests)
+
 set(BENCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/prefilter/scan/bench)
 
 add_executable(prefilter_corpus prefilter/scan/bench/corpus.cpp)
