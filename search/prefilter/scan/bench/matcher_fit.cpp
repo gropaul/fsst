@@ -162,12 +162,6 @@ static std::vector<Kernel> kernels() {
     };
 }
 
-static std::string number(double v) {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%.15g", v);
-    return buf;
-}
-
 static void measure(const std::string& stream, const std::vector<Kernel>& kernels, const std::string& machine,
                     std::vector<std::string>& out) {
     auto [corpus_path, needles_path] = paths(stream, ENCODING);

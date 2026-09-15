@@ -80,6 +80,12 @@ inline std::string machine() {
     return collapse(std::string(arch) + " " + model + " " + isa);
 }
 
+inline std::string number(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.15g", v);
+    return buf;
+}
+
 inline std::filesystem::path output_dir() { return std::filesystem::path(BENCH_DIR) / "output"; }
 
 inline std::string timestamp() {

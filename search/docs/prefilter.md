@@ -577,6 +577,21 @@ First numbers, M4 Pro, GB/s: `eq_or` 87 / 52 / 37 at K = 1 / 2 / 3,
 `range` 65 / 37 / 26 / 20 at R = 1..4, `table` 4.8. Within 10% of the old
 branch's u8 rows in §6.5.
 
+**Stage two sweep**, `prefilter_resolver_sweep` (`resolver_fit.cpp`), the
+mirror of onpair's `resolver_fit`: streams `imdb/name/name_1m` (8 codes a
+row) and `ch/hits/URL_1m` (58), each needing its `.fsst.csv` and catalog
+under `data/`; the IMDb raw comes from `~/imdb.duckdb`, first 1,048,576
+non-empty names. Masks are built once from the cover over a 1M-code prefix,
+for the K = 1 and K = 16 sets of every target; the row layer is fused by
+factors 1, 4, 16 and 64; both resolvers are timed over the blocks that hit
+and checked against the mask's rows. Writes `output/novel_resolve_<stamp>.csv`
+with onpair's columns, 160 rows in under a second, then prints the four
+fitted constants. First fit: word 0.14 ns, linear seek 1.78 per row + 0.39
+per row crossed, gallop 2.55 per halving, crossover at 26 rows crossed per
+emitted row (Rust: 0.05, 3.98, 0.41, 3.89). `plot_resolver.py --data
+paper/data/resolver_fsst_<arch>_<date>.csv --name kernel-resolver-fsst`
+draws it.
+
 ## 12. Decisions (2026-09-15)
 
 | topic | decision |
