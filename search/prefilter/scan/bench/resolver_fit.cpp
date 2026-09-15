@@ -32,7 +32,9 @@ using namespace fsst::search::prefilter::scan::bench;
 constexpr const char* RESOLVER_STREAMS[] = {"imdb/name/name_1m", "ch/hits/URL_1m"};
 constexpr size_t MERGES[] = {1, 4, 16, 64};
 constexpr size_t COUNTS[] = {1, 16};
-constexpr size_t RESOLVER_CODES = 1u << 20;
+// 8 MiB at one byte a code, the working set the matcher sweep walks, so both
+// stages are read against one memory ceiling.
+constexpr size_t RESOLVER_CODES = 8u << 20;
 constexpr size_t WORDS = BLOCK / 64;
 
 struct Row {
