@@ -46,3 +46,6 @@ target_link_libraries (binary12 LINK_PUBLIC fsst12)
 target_link_libraries (binary12 LINK_PUBLIC Threads::Threads)
 set_target_properties(binary12 PROPERTIES OUTPUT_NAME fsst12)
 set_target_properties(binary12 PROPERTIES COMPILE_FLAGS -DFSST12)
+
+enable_testing()
+add_subdirectory(search)
