@@ -214,7 +214,9 @@ edges in series, `Point(b)` then `Pair(a, b)`; a path through them is
 blocked by either, so the cut picks the cheaper and every cut stays a
 sound cover. Escape, Range and Set edges are copied as they are. A pair's
 frequency is the independence estimate `count[a]·count[b]/total`
-(decision 2026-09-15), its λ weight 2. The cover gets `pairs`, the bit
+(first decision 2026-09-15), replaced the same day by the exact count
+`Frequency::pairs[a·256+b]` after the estimate misled the cut; its λ weight
+is 2. The cover gets `pairs`, the bit
 lands on the first code, only `eq_or` compares pairs (`eq(v, a) & eq(v+1,
 b)` with a lagged load, the driver keeps one code past every block
 readable), and the walk is unchanged since the hit is a greedy step. The
@@ -673,6 +675,6 @@ draws it.
 | order of work | stage one kernels, resolvers and the alignment graph first; the walk after; sequence probes later |
 | frequency index | one counting pass over the stream at analysis time, not timed |
 | location | new sources under `search/` in this repo, C++17, library target |
-| pair probes | in, via the unrolled cut graph (§4); pair frequency is the independence estimate; `eq_or` cost per pair is twice a token until the sweep gets P rows |
+| pair probes | in, via the unrolled cut graph (§4), a one-symbol terminal range pairs too; pair frequency is counted exactly (`Frequency::pairs`, 256 KB, same pass; the independence estimate ranked `g`,`o` at 3.4k against 25k real and bought nothing); the sweep has pairs-alone rows at P in {1, 2, 4, 8} (`pairs` column) and `eq_or` is fitted at 0.01674 ns per code per pair |
 | raw codes | sorted codes, written by the compressor: `fsst_sort_codes` permutes the codes at the write sites into byte order of their symbols (§3); a `Range` edge is one `CodeRange` weighing `(0, 1)`, a `Set` edge's weight counts the runs its codes merge to |
 | C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, exact `candidate_rows`, `superset_rows`, `MAX_PATTERN_LEN`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |

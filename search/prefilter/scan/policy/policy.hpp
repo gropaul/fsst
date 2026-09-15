@@ -55,21 +55,17 @@ inline bool takes(Match m, Shape s) {
     return false;
 }
 
-// A pair is two compares and an AND on eq_or: taken as twice a token until
-// the sweep's P rows are fitted.
-constexpr double EQ_OR_PAIR_NS = 0.01566;
-
-// Fitted on aarch64 Apple M4 Pro neon, from novel_mask_2026-09-15_14-05-04.csv.
+// Fitted on aarch64 Apple M4 Pro neon, from novel_mask_2026-09-15_16-09-02.csv.
 // ns per code; k tokens, r ranges, p pairs.
 inline double ns_per_code(Match m, Shape s) {
     const double k = static_cast<double>(s.tokens);
     const double r = static_cast<double>(s.ranges);
     const double p = static_cast<double>(s.pairs);
     switch (m) {
-        case Match::EqOr: return 0.00351 + 0.00783 * k + 0.01151 * r + EQ_OR_PAIR_NS * p;
-        case Match::NibbleN8K: return 0.02681 + 0.01239 * r;
-        case Match::Nibble: return 0.04248;
-        case Match::Range: return 0.00361 + 0.01171 * r;
+        case Match::EqOr: return 0.00330 + 0.00721 * k + 0.01131 * r + 0.01674 * p;
+        case Match::NibbleN8K: return 0.02449 + 0.01230 * r;
+        case Match::Nibble: return 0.03860;
+        case Match::Range: return 0.00350 + 0.01078 * r;
     }
     return INFINITY;
 }

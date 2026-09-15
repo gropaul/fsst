@@ -35,6 +35,9 @@ using namespace fsst::search::prefilter::scan::bench;
 constexpr size_t RANGE_COUNTS[] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32};
 constexpr size_t RANGE_WIDTHS[] = {1, 16, 256};
 constexpr size_t RANGED_TOKEN_COUNTS[] = {1, 8, 16};
+// Pairs alone, made of consecutive needles of the K = 16 set at RANGED_TARGET.
+constexpr size_t PAIR_COUNTS[] = {1, 2, 4, 8};
+constexpr size_t PAIR_SOURCE_COUNT = 16;
 constexpr double RANGED_TARGET = 0.01;
 constexpr size_t RANGED_WIDTH = 16;
 constexpr size_t CODE_SPACE = 256;
@@ -50,12 +53,14 @@ struct Row {
     size_t length, count, ranges, width;
     double target, achieved, prefix_selectivity, gbs, gcodes;
     std::string machine;
+    size_t pairs = 0;  // P, pairs alone: count, length and ranges are zero
 
     double ns() const { return BYTES_PER_CODE / gbs; }
     size_t batches() const { return (std::max<size_t>(count, 1) + matcher::PER_BATCH - 1) / matcher::PER_BATCH; }
 
     // What each kernel's cost is linear in, and the axis name.
     std::optional<std::pair<double, const char*>> regressor() const {
+        if (pairs > 0) return std::nullopt;
         if (matcher == "eq_or") return std::pair{static_cast<double>(count), "K"};
         if (matcher == "nibble_n8k") return std::pair{static_cast<double>(batches()), "B"};
         if (matcher == "range") return std::pair{static_cast<double>(ranges), "R"};
@@ -67,7 +72,8 @@ struct Row {
         return stream + "," + encoding + "," + std::to_string(codes) + "," + std::to_string(rows) + "," + matcher +
                "," + std::to_string(length) + "," + std::to_string(count) + "," + std::to_string(ranges) + "," +
                std::to_string(width) + "," + number(target) + "," + number(achieved) + "," +
-               number(prefix_selectivity) + "," + number(gbs) + "," + number(gcodes) + "," + machine;
+               number(prefix_selectivity) + "," + number(gbs) + "," + number(gcodes) + "," + machine + "," +
+               std::to_string(pairs);
     }
 
     static Row parse(const std::map<std::string, std::string>& f) {
@@ -75,20 +81,22 @@ struct Row {
                    std::stoul(f.at("rows")), f.at("matcher"),           std::stoul(f.at("length")),
                    std::stoul(f.at("count")), std::stoul(f.at("ranges")), std::stoul(f.at("width")),
                    std::stod(f.at("target")), std::stod(f.at("achieved")), std::stod(f.at("prefix_selectivity")),
-                   std::stod(f.at("gbs")),   std::stod(f.at("gcodes")), f.at("machine")};
+                   std::stod(f.at("gbs")),   std::stod(f.at("gcodes")), f.at("machine"),
+                   f.count("pairs") ? std::stoul(f.at("pairs")) : 0};
     }
 };
 
 constexpr const char* HEADER =
     "stream,encoding,codes,rows,matcher,length,count,ranges,width,target,achieved,prefix_selectivity,gbs,gcodes,"
-    "machine";
+    "machine,pairs";
 
 struct Probe {
     const NeedleSet* set;
     std::vector<CodeRange> ranges;
     size_t width;
+    std::vector<CodePair> pairs;
 
-    ProbeCover cover() const { return ProbeCover{set ? set->needles : std::vector<uint8_t>{}, ranges}; }
+    ProbeCover cover() const { return ProbeCover{set ? set->needles : std::vector<uint8_t>{}, ranges, pairs}; }
 };
 
 // R disjoint ranges of `width` codes spread over the code space, or none
@@ -106,17 +114,27 @@ static std::optional<std::vector<CodeRange>> spread_ranges(size_t count, size_t 
 
 static std::vector<Probe> probes(const std::vector<NeedleSet>& sets) {
     std::vector<Probe> out;
-    for (const NeedleSet& set : sets) out.push_back({&set, {}, 0});
+    for (const NeedleSet& set : sets) out.push_back({&set, {}, 0, {}});
     for (size_t count : RANGE_COUNTS)
         for (size_t width : RANGE_WIDTHS)
-            if (auto ranges = spread_ranges(count, width)) out.push_back({nullptr, *ranges, width});
+            if (auto ranges = spread_ranges(count, width)) out.push_back({nullptr, *ranges, width, {}});
     for (const NeedleSet& set : sets) {
         bool beside = std::find(std::begin(RANGED_TOKEN_COUNTS), std::end(RANGED_TOKEN_COUNTS), set.count) !=
                           std::end(RANGED_TOKEN_COUNTS) &&
                       std::abs(set.target - RANGED_TARGET) < 1e-9;
         if (!beside) continue;
         for (size_t count : RANGE_COUNTS)
-            if (auto ranges = spread_ranges(count, RANGED_WIDTH)) out.push_back({&set, *ranges, RANGED_WIDTH});
+            if (auto ranges = spread_ranges(count, RANGED_WIDTH)) out.push_back({&set, *ranges, RANGED_WIDTH, {}});
+    }
+    for (const NeedleSet& set : sets) {
+        if (set.count != PAIR_SOURCE_COUNT || std::abs(set.target - RANGED_TARGET) > 1e-9) continue;
+        for (size_t count : PAIR_COUNTS) {
+            std::vector<CodePair> pairs;
+            for (size_t i = 0; i < count && 2 * i + 1 < set.needles.size(); ++i)
+                pairs.push_back({set.needles[2 * i], set.needles[2 * i + 1]});
+            if (pairs.size() == count) out.push_back({nullptr, {}, 0, pairs});
+        }
+        break;
     }
     return out;
 }
@@ -160,10 +178,10 @@ struct Kernel {
 };
 
 template <typename M>
-static Run only_if(std::function<bool(size_t, size_t)> takes) {
+static Run only_if(std::function<bool(size_t, size_t, size_t)> takes) {
     return [takes](const Probe& probe, const Stream& s) -> std::optional<Timed> {
         ProbeCover cover = probe.cover();
-        if (!takes(cover.points.size(), cover.ranges.size())) return std::nullopt;
+        if (!takes(cover.points.size(), cover.ranges.size(), cover.pairs.size())) return std::nullopt;
         return time_kernel<M>(probe, s);
     };
 }
@@ -183,16 +201,16 @@ template <bool SKIP>
 static Run nibble_n8k() {
     return [](const Probe& probe, const Stream& s) -> std::optional<Timed> {
         size_t k = probe.cover().points.size();
-        if (k == 0) return std::nullopt;
+        if (k == 0 || !probe.pairs.empty()) return std::nullopt;
         size_t batches = (k + matcher::PER_BATCH - 1) / matcher::PER_BATCH;
         return n8k_at<SKIP>(batches, probe, s, std::make_index_sequence<MAX_MEASURED_BATCHES>{});
     };
 }
 
 static std::vector<Kernel> kernels() {
-    auto any = [](size_t, size_t) { return true; };
-    auto tokens = [](size_t k, size_t) { return k > 0; };
-    auto ranges_alone = [](size_t k, size_t r) { return k == 0 && r > 0; };
+    auto any = [](size_t, size_t, size_t p) { return p == 0; };
+    auto tokens = [](size_t k, size_t, size_t p) { return k > 0 || p > 0; };
+    auto ranges_alone = [](size_t k, size_t r, size_t p) { return k == 0 && r > 0 && p == 0; };
     return {
         {"eq_or", only_if<matcher::EqOr<false>>(tokens)},
         {"eq_or_skip", only_if<matcher::EqOr<true>>(tokens)},
@@ -227,7 +245,7 @@ static void measure(const std::string& stream, const std::vector<Kernel>& kernel
         std::vector<size_t> expected;
         for (size_t row = 0; row + 1 < check_rows.size(); ++row)
             for (size_t i = check_rows[row]; i < check_rows[row + 1]; ++i)
-                if (cover.contains(corpus.codes[i])) {
+                if (cover.matches(corpus.codes.data(), i, checked_len)) {
                     expected.push_back(row);
                     break;
                 }
@@ -235,8 +253,8 @@ static void measure(const std::string& stream, const std::vector<Kernel>& kernel
             std::optional<Timed> timed = kernel.run(probe, s);
             if (!timed) continue;
             if (timed->found != expected) {
-                std::fprintf(stderr, "%s differs from the cover on K=%zu R=%zu\n", kernel.name, cover.points.size(),
-                             cover.ranges.size());
+                std::fprintf(stderr, "%s differs from the cover on K=%zu R=%zu P=%zu\n", kernel.name,
+                             cover.points.size(), cover.ranges.size(), cover.pairs.size());
                 std::exit(1);
             }
             double gbs = static_cast<double>(len) * BYTES_PER_CODE / timed->seconds / 1e9;
@@ -244,7 +262,7 @@ static void measure(const std::string& stream, const std::vector<Kernel>& kernel
                               probe.set ? probe.set->count : 0, probe.ranges.size(), probe.width,
                               probe.set ? probe.set->target : 0.0, probe.set ? probe.set->achieved : 0.0,
                               static_cast<double>(timed->found.size()) / (check_rows.size() - 1), gbs,
-                              gbs / BYTES_PER_CODE, machine});
+                              gbs / BYTES_PER_CODE, machine, probe.pairs.size()});
         }
     }
 }
@@ -255,6 +273,7 @@ struct Fit {
     std::optional<std::pair<double, double>> eq_or, range, nibble_n8k;
     std::optional<double> nibble;
     double beside = 0, beside_n8k = 0;
+    double per_pair = 0;  // what a pair adds to eq_or, over its intercept
     double ceiling = 0;
 };
 
@@ -283,8 +302,8 @@ static void snippet(const std::string& machine, const std::string& source, const
     std::printf("\n// Fitted on %s, from %s. ns per code; k tokens, r ranges, b = ceil(k / 8).\n", machine.c_str(),
                 source.c_str());
     if (fit.eq_or)
-        std::printf("case Match::EqOr:      return %.5f + %.5f * k + %.5f * r;\n", fit.eq_or->first, fit.eq_or->second,
-                    fit.beside);
+        std::printf("case Match::EqOr:      return %.5f + %.5f * k + %.5f * r + %.5f * p;\n", fit.eq_or->first,
+                    fit.eq_or->second, fit.beside, fit.per_pair);
     if (fit.nibble_n8k) {
         std::string batches = fit.nibble_n8k->second == 0.0 ? "" : " + " + number(fit.nibble_n8k->second) + " * b";
         std::printf("case Match::NibbleN8K: return %.5f%s + %.5f * r;\n", fit.nibble_n8k->first, batches.c_str(),
@@ -347,6 +366,19 @@ static void fit(const std::vector<Row>& all, const std::string& source) {
             }
         }
 
+        // What a pair adds to eq_or: the residual over its intercept, per
+        // pair, on the pairs-alone rows.
+        if (fit.eq_or) {
+            std::vector<std::pair<double, double>> point;
+            for (const Row* row : rows)
+                if (row->matcher == "eq_or" && row->pairs > 0)
+                    point.push_back({static_cast<double>(row->pairs), row->ns() - fit.eq_or->first});
+            if (point.size() > 1) {
+                fit.per_pair = slope_fit(point);
+                std::printf("  eq_or with pairs: %.5f per pair\n", fit.per_pair);
+            }
+        }
+
         // The fastest any kernel ran at the largest stream: no model term
         // describes it, and nothing predicted above it is reachable.
         fit.ceiling = 1e300;
@@ -364,7 +396,7 @@ static void fit(const std::vector<Row>& all, const std::string& source) {
                 if (skip->matcher != skip_name) continue;
                 for (const Row* plain : rows) {
                     if (plain->matcher != kernel || plain->length != skip->length || plain->count != skip->count ||
-                        plain->ranges != skip->ranges || plain->target != skip->target)
+                        plain->ranges != skip->ranges || plain->pairs != skip->pairs || plain->target != skip->target)
                         continue;
                     auto& cell = delta[number(skip->target)];
                     cell.first += skip->ns() - plain->ns();
