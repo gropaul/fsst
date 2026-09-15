@@ -33,7 +33,10 @@ using namespace fsst::search::prefilter::scan;
 using namespace fsst::search::prefilter::scan::bench;
 
 constexpr size_t RANGE_COUNTS[] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32};
-constexpr size_t RANGE_WIDTHS[] = {1, 16, 256};
+// Width 8 so the full R grid fits: disjoint ranges want width <= 256 / R,
+// and R = 32 leaves eight codes each. A range costs two compares whatever it
+// spans, so this measures the same kernel as u16's width 16 does.
+constexpr size_t RANGE_WIDTHS[] = {1, 8, 16, 256};
 constexpr size_t RANGED_TOKEN_COUNTS[] = {1, 8, 16};
 // Pairs alone, made of consecutive needles of the K = 16 set at RANGED_TARGET.
 constexpr size_t PAIR_COUNTS[] = {1, 2, 4, 8};
@@ -232,6 +235,17 @@ static void measure(const std::string& stream, const std::vector<Kernel>& kernel
     std::vector<NeedleSet> sets;
     for (NeedleSet& set : load_needles(needles_path))
         if (set.sample == SAMPLE) sets.push_back(std::move(set));
+    // The catalog stops at 192 one-code needles, and is already at selectivity
+    // one there: a 256-symbol dictionary holds no 256 codes that miss
+    // anything. K = 256 is the whole dictionary, so name it outright. What it
+    // measures is the kernel at 256 compares, not a cover a planner would cut.
+    NeedleSet whole;
+    whole.count = CODE_SPACE;
+    whole.target = 1.0;
+    whole.achieved = 1.0;
+    whole.sample = SAMPLE;
+    for (size_t c = 0; c < CODE_SPACE; ++c) whole.needles.push_back(static_cast<uint8_t>(c));
+    sets.push_back(std::move(whole));
     std::vector<Probe> all = probes(sets);
     std::printf("\n%s %s: %zu codes, %zu rows, %zu probes over %zu needle sets\n", stream.c_str(), ENCODING,
                 len, row_offsets.size() - 1, all.size(), sets.size());
