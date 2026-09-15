@@ -9,6 +9,8 @@
 
 namespace fsst::search::prefilter::scan::matcher {
 
+#if defined(__ARM_NEON)
+
 struct Held {
     uint8x16_t lo;
     uint8x16_t width;
@@ -23,6 +25,23 @@ inline Hits inside(Held h, Vectors codes) {
     for (size_t i = 0; i < 4; ++i) out[i] = vcleq_u8(vsubq_u8(codes[i], h.lo), h.width);
     return out;
 }
+
+#elif defined(__AVX512BW__)
+
+struct Held {
+    __m512i lo;
+    __m512i width;
+};
+
+inline Held hold(CodeRange r) {
+    return {_mm512_set1_epi8(static_cast<char>(r.begin)), _mm512_set1_epi8(static_cast<char>(r.last - r.begin))};
+}
+
+inline Hits inside(Held h, Vectors codes) {
+    return _mm512_cmple_epu8_mask(_mm512_sub_epi8(codes, h.lo), h.width);
+}
+
+#endif
 
 inline Hits check_ranges(Hits hit, const std::vector<Held>& held, Vectors codes) {
     for (const Held& h : held) hit = or_hits(hit, inside(h, codes));

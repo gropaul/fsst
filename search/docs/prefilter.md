@@ -667,7 +667,7 @@ draws it.
 
 | topic | decision |
 | --- | --- |
-| target | NEON first; AVX2 and AVX-512BW later |
+| target | NEON and AVX-512BW, one explicit body per kernel under `#if defined(__ARM_NEON)` / `#elif defined(__AVX512BW__)` in the same files; on AVX-512 a compare answers into the mask word (`Hits = __mmask64`), the OR is `kor` and the movemask a store; the x86 build is compile-checked on the M4 with `clang++ -target x86_64-apple-darwin -mavx512f -mavx512bw`, its ctest run and the sweeps that fit the x86 policy rows still owed on an AVX-512 host; no AVX2 |
 | input | flat code buffer plus u32 row offsets; the caller works in blocks and the offsets are what makes that possible |
 | chunking | removed from the compressor, AVX-512 compress path disabled (commit 3f46263 on this branch) |
 | escapes | escape-aware graph and walk (§9) |

@@ -76,6 +76,9 @@ inline std::string machine() {
 #if defined(__aarch64__)
     const char* arch = "aarch64";
     const char* isa = "neon";
+#elif defined(__AVX512BW__)
+    const char* arch = "x86_64";
+    const char* isa = "avx512bw";
 #else
     const char* arch = "x86_64";
     const char* isa = "scalar";

@@ -25,14 +25,20 @@ class Nibble {
         for (uint8_t t : cover.points) set(t);
         for (CodeRange r : cover.ranges)
             for (unsigned c = r.begin; c <= r.last; ++c) set(static_cast<uint8_t>(c));
+#if defined(__ARM_NEON)
         low_ = vld1q_u8(low);
         high_ = vld1q_u8(high);
+#elif defined(__AVX512BW__)
+        low_ = broadcast_table(low);
+        high_ = broadcast_table(high);
+#endif
     }
 
+    // 1 << (high nibble % 8), indexed by the whole high nibble.
+    static constexpr uint8_t BIT[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+
+#if defined(__ARM_NEON)
     bool check(const uint8_t* codes, Mask& bits) const {
-        // 1 << (high nibble % 8), indexed by the whole high nibble.
-        alignas(16) static const uint8_t BIT[16] = {1, 2, 4, 8, 16, 32, 64, 128,
-                                                    1, 2, 4, 8, 16, 32, 64, 128};
         const uint8x16_t bit = vld1q_u8(BIT);
         const uint8x16_t row = vdupq_n_u8(0x8f);
         const uint8x16_t half = vdupq_n_u8(0x80);
@@ -52,6 +58,26 @@ class Nibble {
    private:
     uint8x16_t low_;
     uint8x16_t high_;
+#elif defined(__AVX512BW__)
+    bool check(const uint8_t* codes, Mask& bits) const {
+        const __m512i bit = broadcast_table(BIT);
+        const __m512i row = _mm512_set1_epi8(static_cast<char>(0x8f));
+        const __m512i half = _mm512_set1_epi8(static_cast<char>(0x80));
+        const __m512i nibble = _mm512_set1_epi8(0x0f);
+        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
+            // bit 7 kept in the index: vpshufb returns 0 for the wrong half.
+            __m512i index = _mm512_and_si512(v, row);
+            __m512i rows = _mm512_or_si512(_mm512_shuffle_epi8(low_, index),
+                                           _mm512_shuffle_epi8(high_, _mm512_xor_si512(index, half)));
+            __m512i n1 = _mm512_and_si512(_mm512_srli_epi16(v, 4), nibble);
+            return _mm512_test_epi8_mask(rows, _mm512_shuffle_epi8(bit, n1));
+        });
+    }
+
+   private:
+    __m512i low_;
+    __m512i high_;
+#endif
 };
 
 }  // namespace fsst::search::prefilter::scan::matcher

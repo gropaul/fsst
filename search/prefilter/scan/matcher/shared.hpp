@@ -1,19 +1,26 @@
 #pragma once
 
-// Load, OR, any and movemask around each kernel's compare. NEON, u8 lanes:
-// 64 codes are four vectors, hits are 0xFF/0x00 bytes.
+// Load, OR, any and movemask around each kernel's compare, per instruction
+// set. NEON, u8 lanes: 64 codes are four vectors, hits are 0xFF/0x00 bytes.
+// AVX-512BW: 64 codes are one vector, a compare answers straight into the
+// mask word, so the OR is `kor` and the movemask is a store. Each kernel
+// file holds one explicit body per set under the same #if.
 
-#ifndef __ARM_NEON
-#error "the vector matchers are NEON only for now"
-#endif
-
+#if defined(__ARM_NEON)
 #include <arm_neon.h>
+#elif defined(__AVX512BW__)
+#include <immintrin.h>
+#else
+#error "the vector matchers need NEON or AVX-512BW"
+#endif
 
 #include <array>
 
 #include "../scan.hpp"
 
 namespace fsst::search::prefilter::scan::matcher {
+
+#if defined(__ARM_NEON)
 
 using Vectors = std::array<uint8x16_t, 4>;
 using Hits = std::array<uint8x16_t, 4>;
@@ -66,5 +73,46 @@ bool words(const uint8_t* codes, Mask& bits, HitsOf hits) {
     }
     return written;
 }
+
+#elif defined(__AVX512BW__)
+
+using Vectors = __m512i;
+using Hits = __mmask64;
+
+inline Vectors load(const uint8_t* at) { return _mm512_loadu_si512(at); }
+
+inline Hits or_hits(Hits a, Hits b) { return a | b; }
+
+inline bool any(Hits a, Hits b) { return (a | b) != 0; }
+
+inline void movemask(uint64_t* bits, Hits a, Hits b) {
+    bits[0] = a;
+    bits[1] = b;
+}
+
+// A 16-byte table in every 128-bit lane, where vpshufb looks.
+inline __m512i broadcast_table(const uint8_t* table) {
+    return _mm512_broadcast_i32x4(_mm_loadu_si128(reinterpret_cast<const __m128i*>(table)));
+}
+
+template <bool SKIP_MOVEMASK_IF_NO_MATCH, typename HitsOf>
+bool words(const uint8_t* codes, Mask& bits, HitsOf hits) {
+    bool written = false;
+    for (size_t pair = 0; pair < BLOCK / 128; ++pair) {
+        const uint8_t* at = codes + pair * 128;
+        Hits a = hits(load(at), at);
+        Hits b = hits(load(at + 64), at + 64);
+        if (SKIP_MOVEMASK_IF_NO_MATCH && !any(a, b)) {
+            bits[2 * pair] = 0;
+            bits[2 * pair + 1] = 0;
+            continue;
+        }
+        written = true;
+        movemask(&bits[2 * pair], a, b);
+    }
+    return written;
+}
+
+#endif
 
 }  // namespace fsst::search::prefilter::scan::matcher

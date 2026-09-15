@@ -15,9 +15,9 @@ template <bool SKIP_MOVEMASK_IF_NO_MATCH>
 class EqOr {
    public:
     explicit EqOr(const ProbeCover& cover) {
-        for (uint8_t t : cover.points) tokens_.push_back(vdupq_n_u8(t));
+        for (uint8_t t : cover.points) tokens_.push_back(broadcast(t));
         for (CodeRange r : cover.ranges) ranges_.push_back(hold(r));
-        for (CodePair p : cover.pairs) pairs_.push_back({vdupq_n_u8(p.first), vdupq_n_u8(p.second)});
+        for (CodePair p : cover.pairs) pairs_.push_back({broadcast(p.first), broadcast(p.second)});
     }
 
     // The pair path is chosen once per block, so a cover without pairs runs
@@ -28,20 +28,20 @@ class EqOr {
                 return check_ranges(token_hits(v), ranges_, v);
             });
         return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t* at) {
-            Hits hit = tokens_.empty() ? Hits{vdupq_n_u8(0), vdupq_n_u8(0), vdupq_n_u8(0), vdupq_n_u8(0)}
-                                       : token_hits(v);
+            Hits hit = tokens_.empty() ? no_hits() : token_hits(v);
             Vectors next = load(at + 1);
-            for (const Pair& p : pairs_)
-                for (size_t i = 0; i < 4; ++i)
-                    hit[i] = vorrq_u8(hit[i], vandq_u8(vceqq_u8(v[i], p.first), vceqq_u8(next[i], p.second)));
+            for (const Pair& p : pairs_) hit = or_hits(hit, pair_hits(v, next, p));
             return check_ranges(hit, ranges_, v);
         });
     }
 
    private:
-    struct Pair {
-        uint8x16_t first, second;
-    };
+#if defined(__ARM_NEON)
+    using Token = uint8x16_t;
+
+    static Token broadcast(uint8_t code) { return vdupq_n_u8(code); }
+
+    static Hits no_hits() { return {vdupq_n_u8(0), vdupq_n_u8(0), vdupq_n_u8(0), vdupq_n_u8(0)}; }
 
     // K >= 1 here.
     Hits token_hits(Vectors codes) const {
@@ -51,8 +51,37 @@ class EqOr {
             for (size_t i = 0; i < 4; ++i) hit[i] = vorrq_u8(hit[i], vceqq_u8(codes[i], tokens_[k]));
         return hit;
     }
+#elif defined(__AVX512BW__)
+    using Token = __m512i;
 
-    std::vector<uint8x16_t> tokens_;
+    static Token broadcast(uint8_t code) { return _mm512_set1_epi8(static_cast<char>(code)); }
+
+    static Hits no_hits() { return 0; }
+
+    Hits token_hits(Vectors codes) const {
+        Hits hit = _mm512_cmpeq_epi8_mask(codes, tokens_[0]);
+        for (size_t k = 1; k < tokens_.size(); ++k) hit |= _mm512_cmpeq_epi8_mask(codes, tokens_[k]);
+        return hit;
+    }
+#endif
+
+    struct Pair {
+        Token first, second;
+    };
+
+#if defined(__ARM_NEON)
+    static Hits pair_hits(Vectors v, Vectors next, const Pair& p) {
+        Hits hit;
+        for (size_t i = 0; i < 4; ++i) hit[i] = vandq_u8(vceqq_u8(v[i], p.first), vceqq_u8(next[i], p.second));
+        return hit;
+    }
+#elif defined(__AVX512BW__)
+    static Hits pair_hits(Vectors v, Vectors next, const Pair& p) {
+        return _mm512_cmpeq_epi8_mask(v, p.first) & _mm512_cmpeq_epi8_mask(next, p.second);
+    }
+#endif
+
+    std::vector<Token> tokens_;
     std::vector<Held> ranges_;
     std::vector<Pair> pairs_;
 };

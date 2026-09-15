@@ -16,19 +16,25 @@ namespace fsst::search::prefilter::scan::matcher {
 constexpr size_t PER_BATCH = 8;
 constexpr size_t MAX_BATCHES = 1;
 
+// Token k owns bit 1 << k in the row each of its nibbles indexes.
+inline void batch_tables(const uint8_t* tokens, size_t count, uint8_t* low, uint8_t* high) {
+    for (size_t k = 0; k < count; ++k) {
+        low[tokens[k] & 0x0f] |= static_cast<uint8_t>(1u << k);
+        high[tokens[k] >> 4] |= static_cast<uint8_t>(1u << k);
+    }
+}
+
+#if defined(__ARM_NEON)
+
 struct Batch {
     uint8x16_t low;
     uint8x16_t high;
 };
 
-// Token k owns bit 1 << k in the row each of its nibbles indexes.
 inline Batch batch(const uint8_t* tokens, size_t count) {
     alignas(16) uint8_t low[16] = {};
     alignas(16) uint8_t high[16] = {};
-    for (size_t k = 0; k < count; ++k) {
-        low[tokens[k] & 0x0f] |= static_cast<uint8_t>(1u << k);
-        high[tokens[k] >> 4] |= static_cast<uint8_t>(1u << k);
-    }
+    batch_tables(tokens, count, low, high);
     return {vld1q_u8(low), vld1q_u8(high)};
 }
 
@@ -53,6 +59,38 @@ inline Hits probe(const std::array<Batch, BATCHES>& batches, Vectors codes) {
     }
     return out;
 }
+
+#elif defined(__AVX512BW__)
+
+struct Batch {
+    __m512i low;
+    __m512i high;
+};
+
+inline Batch batch(const uint8_t* tokens, size_t count) {
+    alignas(16) uint8_t low[16] = {};
+    alignas(16) uint8_t high[16] = {};
+    batch_tables(tokens, count, low, high);
+    return {broadcast_table(low), broadcast_table(high)};
+}
+
+// No per-byte shift on x86: the high nibble is a word shift masked back.
+template <size_t BATCHES>
+inline Hits probe(const std::array<Batch, BATCHES>& batches, Vectors codes) {
+    const __m512i nibble = _mm512_set1_epi8(0x0f);
+    __m512i n0 = _mm512_and_si512(codes, nibble);
+    __m512i n1 = _mm512_and_si512(_mm512_srli_epi16(codes, 4), nibble);
+    __m512i low = _mm512_shuffle_epi8(batches[0].low, n0);
+    __m512i high = _mm512_shuffle_epi8(batches[0].high, n1);
+    if constexpr (BATCHES == 1) return _mm512_test_epi8_mask(low, high);
+    __m512i hit = _mm512_and_si512(low, high);
+    for (size_t b = 1; b < BATCHES; ++b)
+        hit = _mm512_or_si512(hit, _mm512_and_si512(_mm512_shuffle_epi8(batches[b].low, n0),
+                                                    _mm512_shuffle_epi8(batches[b].high, n1)));
+    return _mm512_test_epi8_mask(hit, hit);
+}
+
+#endif
 
 template <size_t BATCHES, bool SKIP_MOVEMASK_IF_NO_MATCH>
 class NibbleN8 {
