@@ -17,11 +17,14 @@ namespace fsst::search::prefilter {
 struct Frequency {
     std::array<uint32_t, 256> count{};
     std::array<uint32_t, 257> cum{};  // cum[c] = sum of count[0..c)
+    std::vector<uint32_t> pairs;      // pairs[a * 256 + b]: positions with a then b, row boundaries included
     uint32_t total = 0;
 
     static Frequency of(const uint8_t* codes, size_t len) {
         Frequency f;
+        f.pairs.assign(256 * 256, 0);
         for (size_t i = 0; i < len; ++i) ++f.count[codes[i]];
+        for (size_t i = 0; i + 1 < len; ++i) ++f.pairs[codes[i] * 256 + codes[i + 1]];
         for (size_t c = 0; c < 256; ++c) f.cum[c + 1] = f.cum[c] + f.count[c];
         f.total = static_cast<uint32_t>(len);
         return f;
@@ -36,10 +39,9 @@ struct Frequency {
         return sum;
     }
 
-    // Expected positions of the pair under code independence.
+    // Positions where the pair stands, counted; zero for an index without pairs.
     uint32_t pair_estimate(CodePair p) const {
-        if (total == 0) return 0;
-        return static_cast<uint32_t>(static_cast<uint64_t>(count[p.first]) * count[p.second] / total);
+        return pairs.empty() ? 0 : pairs[p.first * 256 + p.second];
     }
 
     uint32_t of_cover(const ProbeCover& cover) const {
