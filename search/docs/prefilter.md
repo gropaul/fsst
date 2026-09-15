@@ -180,7 +180,7 @@ build_state(o):
     if g = (token, len):
         if o + len < n: add_edge(o, o + len, Point(token))   # o + len == n is inside r
         return o + len
-    else: dead end                                  # new: panic; FSST: escape edge, §9
+    else: add_edge(o, o + 1, Escape(byte = needle[o]))  # probe code 255; new panics here, §9
 ```
 
 `alignment_candidates`, new version, two passes over the token payload:
@@ -641,5 +641,5 @@ draws it.
 | order of work | stage one kernels, resolvers and the alignment graph first; the walk after; sequence probes later |
 | frequency index | one counting pass over the stream at analysis time, not timed |
 | location | new sources under `search/` in this repo, C++17, library target |
-| raw codes | still open: cover as runs over raw codes with the λ weight counting raw runs, or a sorted permutation kept for the planner so a `Range` stays one cut term |
-| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt` |
+| raw codes | cover over raw codes, no permutation: a `Range` or `Set` edge holds its raw code set, `from_edge_cut` merges the runs, and the λ weight of an edge counts the runs its own codes merge to (`points + 2·ranges` of that edge alone) |
+| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis`, `analyze`, `superset_rows`, `MAX_PATTERN_LEN`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |

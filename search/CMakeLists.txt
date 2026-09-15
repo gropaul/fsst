@@ -14,6 +14,11 @@ add_executable(prefilter_policy_tests prefilter/scan/policy/tests.cpp)
 target_link_libraries(prefilter_policy_tests fsst_search)
 add_test(NAME prefilter_policy COMMAND prefilter_policy_tests)
 
+add_executable(prefilter_tests prefilter/tests.cpp)
+target_link_libraries(prefilter_tests fsst_search fsst)
+target_include_directories(prefilter_tests PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME prefilter COMMAND prefilter_tests)
+
 set(BENCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/prefilter/scan/bench)
 
 add_executable(prefilter_corpus prefilter/scan/bench/corpus.cpp)
