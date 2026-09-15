@@ -577,6 +577,31 @@ First numbers, M4 Pro, GB/s: `eq_or` 87 / 52 / 37 at K = 1 / 2 / 3,
 `range` 65 / 37 / 26 / 20 at R = 1..4, `table` 4.8. Within 10% of the old
 branch's u8 rows in §6.5.
 
+**Fit.** Both sweeps end by fitting the cost model to their rows and print
+the block to paste into the policy; `--refit [csv]` does the same from the
+newest CSV in `output/`, or the one named, without sweeping. The matcher
+fit mirrors onpair's: a relative-error weighted line per kernel over its own
+axis (K, batches, R; flat for `nibble` and `table`), the per-range slope
+from the residual over the tokens-only line for `eq_or` and `nibble_n8k`,
+the rate ceiling, and the skip flag's cost at each selectivity. First fit on
+the M4 Pro, ns per code:
+
+| kernel | fitted | old Rust u8 row |
+| --- | --- | --- |
+| eq_or | 0.0035 + 0.0078·K + 0.0115·R | 0.0041 + 0.0070·K + 0.0119·R |
+| range | 0.0036 + 0.0117·R | 0.0032 + 0.0111·R |
+| nibble_n8k | 0.0268 + 0.0124·R | 0.0243 + 0.0115·R |
+| nibble | 0.0425 | 0.0386 |
+| table | 0.208 | 0.195 at u16 |
+
+Skip flag: saves 0.0006 (eq_or) to 0.003 (nibble_n8k) ns per code on a
+stream nothing hits, costs 0.008 to 0.026 from target 0.001 up, so the
+break-even sits below 1e-3 bits per code here, lower than the README's
+2.3e-3. One numerical point: the flat-line test in `line_fit` is relative,
+because clang contracts `sw·swxx - swx²` into an FMA and the exact zero
+comes out as 1e-7, which turned the flat `nibble_n8k` line into a negative
+intercept before the fix.
+
 **Stage two sweep**, `prefilter_resolver_sweep` (`resolver_fit.cpp`), the
 mirror of onpair's `resolver_fit`: streams `imdb/name/name_1m` (8 codes a
 row) and `ch/hits/URL_1m` (58), each needing its `.fsst.csv` and catalog

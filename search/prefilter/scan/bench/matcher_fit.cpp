@@ -1,15 +1,19 @@
 // Stage one: every kernel against every probe shape, timed over a prefix of
-// the stream, one CSV row per pair. Mirrors onpair's matcher_fit sweep so the
+// the stream, one CSV row per pair, then the matcher rows of the cost model
+// fitted to what that measured. Mirrors onpair's matcher_fit sweep so the
 // paper's plot_matcher.py reads the file unchanged.
 //
-//   prefilter_matcher_sweep
+//   prefilter_matcher_sweep                 sweep, write the CSV, fit
+//   prefilter_matcher_sweep --refit [csv]   fit the newest CSV, or the one named
 //
 // A probe is K codes from the catalog, R ranges spread over the code space,
 // or both. Only R is swept for ranges; the codes per range are the control.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -36,15 +40,56 @@ constexpr double RANGED_TARGET = 0.01;
 constexpr size_t RANGED_WIDTH = 16;
 constexpr size_t CODE_SPACE = 256;
 constexpr size_t MAX_MEASURED_BATCHES = 32;
+constexpr double BYTES_PER_CODE = 1.0;
+
+// One measurement. `count` is K and `length` 1, both zero where a probe is
+// ranges alone; `ranges` is R and `width` the codes in each, zero without.
+struct Row {
+    std::string stream, encoding;
+    size_t codes, rows;
+    std::string matcher;
+    size_t length, count, ranges, width;
+    double target, achieved, prefix_selectivity, gbs, gcodes;
+    std::string machine;
+
+    double ns() const { return BYTES_PER_CODE / gbs; }
+    size_t batches() const { return (std::max<size_t>(count, 1) + matcher::PER_BATCH - 1) / matcher::PER_BATCH; }
+
+    // What each kernel's cost is linear in, and the axis name.
+    std::optional<std::pair<double, const char*>> regressor() const {
+        if (matcher == "eq_or") return std::pair{static_cast<double>(count), "K"};
+        if (matcher == "nibble_n8k") return std::pair{static_cast<double>(batches()), "B"};
+        if (matcher == "range") return std::pair{static_cast<double>(ranges), "R"};
+        if (matcher == "table" || matcher == "nibble") return std::pair{0.0, ""};
+        return std::nullopt;
+    }
+
+    std::string csv() const {
+        return stream + "," + encoding + "," + std::to_string(codes) + "," + std::to_string(rows) + "," + matcher +
+               "," + std::to_string(length) + "," + std::to_string(count) + "," + std::to_string(ranges) + "," +
+               std::to_string(width) + "," + number(target) + "," + number(achieved) + "," +
+               number(prefix_selectivity) + "," + number(gbs) + "," + number(gcodes) + "," + machine;
+    }
+
+    static Row parse(const std::map<std::string, std::string>& f) {
+        return Row{f.at("stream"),           f.at("encoding"),          std::stoul(f.at("codes")),
+                   std::stoul(f.at("rows")), f.at("matcher"),           std::stoul(f.at("length")),
+                   std::stoul(f.at("count")), std::stoul(f.at("ranges")), std::stoul(f.at("width")),
+                   std::stod(f.at("target")), std::stod(f.at("achieved")), std::stod(f.at("prefix_selectivity")),
+                   std::stod(f.at("gbs")),   std::stod(f.at("gcodes")), f.at("machine")};
+    }
+};
+
+constexpr const char* HEADER =
+    "stream,encoding,codes,rows,matcher,length,count,ranges,width,target,achieved,prefix_selectivity,gbs,gcodes,"
+    "machine";
 
 struct Probe {
     const NeedleSet* set;
     std::vector<CodeRange> ranges;
     size_t width;
 
-    ProbeCover cover() const {
-        return ProbeCover{set ? set->needles : std::vector<uint8_t>{}, ranges};
-    }
+    ProbeCover cover() const { return ProbeCover{set ? set->needles : std::vector<uint8_t>{}, ranges}; }
 };
 
 // R disjoint ranges of `width` codes spread over the code space, or none
@@ -163,7 +208,7 @@ static std::vector<Kernel> kernels() {
 }
 
 static void measure(const std::string& stream, const std::vector<Kernel>& kernels, const std::string& machine,
-                    std::vector<std::string>& out) {
+                    std::vector<Row>& out) {
     auto [corpus_path, needles_path] = paths(stream, ENCODING);
     Corpus corpus = load_corpus(corpus_path);
     size_t len = std::min(CODES, corpus.codes.size());
@@ -196,32 +241,168 @@ static void measure(const std::string& stream, const std::vector<Kernel>& kernel
                              cover.ranges.size());
                 std::exit(1);
             }
-            size_t length = probe.set ? 1 : 0;
-            size_t count = probe.set ? probe.set->count : 0;
-            double target = probe.set ? probe.set->target : 0.0;
-            double achieved = probe.set ? probe.set->achieved : 0.0;
-            double gbs = static_cast<double>(len) / timed->seconds / 1e9;
-            std::string row = stream + "," + ENCODING + "," + std::to_string(len) + "," +
-                              std::to_string(row_offsets.size() - 1) + "," + kernel.name + "," +
-                              std::to_string(length) + "," + std::to_string(count) + "," +
-                              std::to_string(probe.ranges.size()) + "," + std::to_string(probe.width) + "," +
-                              number(target) + "," + number(achieved) + "," +
-                              number(static_cast<double>(timed->found.size()) / (check_rows.size() - 1)) + "," +
-                              number(gbs) + "," + number(gbs) + "," + machine;
-            out.push_back(std::move(row));
+            double gbs = static_cast<double>(len) * BYTES_PER_CODE / timed->seconds / 1e9;
+            out.push_back(Row{stream, ENCODING, len, row_offsets.size() - 1, kernel.name, probe.set ? 1u : 0u,
+                              probe.set ? probe.set->count : 0, probe.ranges.size(), probe.width,
+                              probe.set ? probe.set->target : 0.0, probe.set ? probe.set->achieved : 0.0,
+                              static_cast<double>(timed->found.size()) / (check_rows.size() - 1), gbs,
+                              gbs / BYTES_PER_CODE, machine});
         }
     }
 }
 
-int main() {
+// One machine's coefficients: an intercept and a slope per kernel, and what
+// a range adds to the kernels that fold them in.
+struct Fit {
+    std::optional<std::pair<double, double>> eq_or, range, nibble_n8k;
+    std::optional<double> table, nibble;
+    double beside = 0, beside_n8k = 0;
+    double ceiling = 0;
+};
+
+// The rows of one kernel with no ranges beside its tokens, which is the line
+// the ranges are then fitted on top of. The model only prices the batches
+// the planner can pick.
+static std::vector<const Row*> alone(const std::vector<const Row*>& rows, const std::string& kernel) {
+    std::vector<const Row*> out;
+    for (const Row* row : rows)
+        if (row->matcher == kernel && (row->ranges == 0 || kernel == "range") &&
+            (kernel != "nibble_n8k" || row->batches() <= matcher::MAX_BATCHES))
+            out.push_back(row);
+    return out;
+}
+
+static std::vector<std::pair<double, double>> points(const std::vector<const Row*>& rows) {
+    std::vector<std::pair<double, double>> out;
+    for (const Row* row : rows)
+        if (auto reg = row->regressor()) out.push_back({reg->first, row->ns()});
+    return out;
+}
+
+// The fit as the policy's cost table will take it, to paste under this
+// machine's instruction set.
+static void snippet(const std::string& machine, const std::string& source, const Fit& fit) {
+    std::printf("\n// Fitted on %s, from %s. ns per code; k tokens, r ranges, b = ceil(k / 8).\n", machine.c_str(),
+                source.c_str());
+    if (fit.table) std::printf("case Match::Table:     return %.3f;\n", *fit.table);
+    if (fit.eq_or)
+        std::printf("case Match::EqOr:      return %.5f + %.5f * k + %.5f * r;\n", fit.eq_or->first, fit.eq_or->second,
+                    fit.beside);
+    if (fit.nibble_n8k) {
+        std::string batches = fit.nibble_n8k->second == 0.0 ? "" : " + " + number(fit.nibble_n8k->second) + " * b";
+        std::printf("case Match::NibbleN8K: return %.5f%s + %.5f * r;\n", fit.nibble_n8k->first, batches.c_str(),
+                    fit.beside_n8k);
+    }
+    if (fit.nibble) std::printf("case Match::Nibble:    return %.5f;\n", *fit.nibble);
+    if (fit.range) std::printf("case Match::Range:     return %.5f + %.5f * r;\n", fit.range->first, fit.range->second);
+    std::printf("// nothing above %.1f GB/s was reachable, so clamp with max(%.5f) if that binds.\n",
+                BYTES_PER_CODE / fit.ceiling, fit.ceiling);
+}
+
+static void fit(const std::vector<Row>& all, const std::string& source) {
+    std::map<std::string, std::vector<const Row*>> group;
+    for (const Row& row : all) group[row.machine].push_back(&row);
+
+    std::map<std::string, Fit> fitted;
+    for (auto& [machine, rows] : group) {
+        size_t codes = 0;
+        for (const Row* row : rows) codes = std::max(codes, row->codes);
+        Fit fit;
+        std::printf("\n%s  up to %zu codes\n", machine.c_str(), codes);
+        std::printf("  %-13s %-26s %6s\n", "kernel", "fitted ns/code", "fit%");
+        for (const char* kernel : {"eq_or", "range", "nibble_n8k", "nibble", "table"}) {
+            std::vector<const Row*> own = alone(rows, kernel);
+            std::vector<std::pair<double, double>> point = points(own);
+            if (point.empty()) continue;
+            const char* axis = own[0]->regressor()->second;
+            auto ab = line_fit(point);
+            double a = ab.first, b = ab.second;
+            bool flat = std::all_of(point.begin(), point.end(), [&](auto p) { return p.first == point[0].first; });
+            std::string kernel_name = kernel;
+            if (kernel_name == "eq_or") fit.eq_or = {a, b};
+            if (kernel_name == "range") fit.range = {a, b};
+            if (kernel_name == "nibble_n8k") fit.nibble_n8k = {a, flat ? 0.0 : b};
+            if (kernel_name == "nibble") fit.nibble = a;
+            if (kernel_name == "table") fit.table = a;
+            std::string shown = flat ? number(a).substr(0, 7) : number(a).substr(0, 7) + " + " + number(b).substr(0, 7) + "*" + axis;
+            std::printf("  %-13s %-26s %6.1f\n", kernel, shown.c_str(),
+                        rel_error(point, [&](double x) { return a + b * x; }));
+        }
+
+        // What a range adds to a token kernel: the residual over that
+        // kernel's own line, per range, on the rows carrying both.
+        for (const char* kernel : {"eq_or", "nibble_n8k"}) {
+            std::vector<std::pair<double, double>> own = points(alone(rows, kernel));
+            if (own.empty()) continue;
+            auto ab = line_fit(own);
+            double a = ab.first, b = ab.second;
+            std::vector<std::pair<double, double>> point;
+            for (const Row* row : rows) {
+                if (row->matcher != kernel || row->ranges == 0 || row->count == 0) continue;
+                auto reg = row->regressor();
+                if (!reg) continue;
+                double residual = row->ns() - (a + b * reg->first);
+                if (residual > 0.0) point.push_back({static_cast<double>(row->ranges), residual});
+            }
+            if (point.size() > 1) {
+                double per_range = slope_fit(point);
+                std::printf("  %s with ranges: %.5f per range\n", kernel, per_range);
+                (std::string(kernel) == "eq_or" ? fit.beside : fit.beside_n8k) = per_range;
+            }
+        }
+
+        // The fastest any kernel ran at the largest stream: no model term
+        // describes it, and nothing predicted above it is reachable.
+        fit.ceiling = 1e300;
+        for (const Row* row : rows)
+            if (row->codes == codes) fit.ceiling = std::min(fit.ceiling, row->ns());
+        std::printf("  ceiling at %zu codes: %.2f GB/s, so no ns/code below %.5f\n", codes, BYTES_PER_CODE / fit.ceiling,
+                    fit.ceiling);
+
+        // The skip flag as the two ends the model is fitted to: what it costs
+        // where every group matches, what it saves where none does.
+        for (const char* kernel : {"eq_or", "nibble_n8k", "nibble"}) {
+            std::map<std::string, std::pair<double, size_t>> delta;
+            std::string skip_name = std::string(kernel) + "_skip";
+            for (const Row* skip : rows) {
+                if (skip->matcher != skip_name) continue;
+                for (const Row* plain : rows) {
+                    if (plain->matcher != kernel || plain->length != skip->length || plain->count != skip->count ||
+                        plain->ranges != skip->ranges || plain->target != skip->target)
+                        continue;
+                    auto& cell = delta[number(skip->target)];
+                    cell.first += skip->ns() - plain->ns();
+                    cell.second += 1;
+                    break;
+                }
+            }
+            if (delta.empty()) continue;
+            std::printf("  %s skip flag, ns/code by selectivity:", kernel);
+            for (auto& [target, cell] : delta) std::printf("  %s %+.5f", target.c_str(), cell.first / cell.second);
+            std::printf("\n");
+        }
+        fitted[machine] = fit;
+    }
+    for (auto& [machine, fit] : fitted) snippet(machine, source, fit);
+}
+
+int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "--refit") {
+        auto path = csv_source("novel_mask", argc >= 3 ? argv[2] : "");
+        std::vector<Row> rows;
+        for (auto& fields : read_csv(path)) rows.push_back(Row::parse(fields));
+        std::printf("%s\n%zu rows\n", path.c_str(), rows.size());
+        fit(rows, path.filename().string());
+        return 0;
+    }
     std::string name = machine();
-    std::vector<std::string> rows;
+    std::vector<Row> rows;
     std::vector<Kernel> all = kernels();
     for (const char* stream : STREAMS) measure(stream, all, name, rows);
-    auto path = write_csv("novel_mask",
-                          "stream,encoding,codes,rows,matcher,length,count,ranges,width,target,achieved,"
-                          "prefix_selectivity,gbs,gcodes,machine",
-                          rows);
+    std::vector<std::string> lines;
+    for (const Row& row : rows) lines.push_back(row.csv());
+    auto path = write_csv("novel_mask", HEADER, lines);
     std::printf("%zu rows -> %s\n", rows.size(), path.c_str());
+    fit(rows, path.filename().string());
     return 0;
 }

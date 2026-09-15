@@ -3,11 +3,14 @@
 // The timer, the machine name and the CSV writer the sweeps share.
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fsst::search::prefilter::scan::bench {
@@ -104,6 +107,93 @@ inline std::filesystem::path write_csv(const std::string& prefix, const std::str
     out << header << '\n';
     for (const std::string& row : rows) out << row << '\n';
     return path;
+}
+
+// The newest `output/<prefix>_*.csv`, or `given` when it is not empty.
+inline std::filesystem::path csv_source(const std::string& prefix, const std::string& given) {
+    if (!given.empty()) return given;
+    std::filesystem::path newest;
+    for (auto& entry : std::filesystem::directory_iterator(output_dir())) {
+        std::string name = entry.path().filename().string();
+        if (name.rfind(prefix + "_", 0) == 0 && name.size() > 4 && name.compare(name.size() - 4, 4, ".csv") == 0 &&
+            (newest.empty() || entry.path().filename() > newest.filename()))
+            newest = entry.path();
+    }
+    if (newest.empty()) {
+        std::fprintf(stderr, "run the %s sweep first\n", prefix.c_str());
+        std::exit(1);
+    }
+    return newest;
+}
+
+// A CSV as one map per row, keyed by the header.
+inline std::vector<std::map<std::string, std::string>> read_csv(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    if (!in) {
+        std::fprintf(stderr, "cannot read %s\n", path.c_str());
+        std::exit(1);
+    }
+    auto split = [](const std::string& line) {
+        std::vector<std::string> out;
+        size_t at = 0;
+        while (true) {
+            size_t end = line.find(',', at);
+            out.push_back(line.substr(at, end == std::string::npos ? std::string::npos : end - at));
+            if (end == std::string::npos) return out;
+            at = end + 1;
+        }
+    };
+    std::string line;
+    std::getline(in, line);
+    std::vector<std::string> header = split(line);
+    std::vector<std::map<std::string, std::string>> rows;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::vector<std::string> field = split(line);
+        std::map<std::string, std::string> row;
+        for (size_t i = 0; i < header.size() && i < field.size(); ++i) row[header[i]] = field[i];
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+// `a + b*x` minimising the relative error: a model is read as a rate.
+inline std::pair<double, double> line_fit(const std::vector<std::pair<double, double>>& point) {
+    double sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0;
+    for (auto [x, y] : point) {
+        double w = 1.0 / (y * y);
+        sw += w;
+        swx += w * x;
+        swy += w * y;
+        swxx += w * x * x;
+        swxy += w * x * y;
+    }
+    // Relative, because an FMA contraction leaves a residual where the exact
+    // difference is zero, and the slope would then be noise over noise.
+    double spread = sw * swxx - swx * swx;
+    if (std::fabs(spread) <= 1e-9 * sw * swxx) return {swy / sw, 0.0};
+    double slope = (sw * swxy - swx * swy) / spread;
+    return {(swy - slope * swx) / sw, slope};
+}
+
+// A slope through the origin, for what one term adds to a model fitted without it.
+inline double slope_fit(const std::vector<std::pair<double, double>>& point) {
+    double swxy = 0, swxx = 0;
+    for (auto [x, y] : point) {
+        double w = 1.0 / (y * y);
+        swxy += w * x * y;
+        swxx += w * x * x;
+    }
+    return std::fabs(swxx) < 1e-12 ? 0.0 : swxy / swxx;
+}
+
+// Mean relative error of `pred` over the points, in percent.
+template <typename Pred>
+inline double rel_error(const std::vector<std::pair<double, double>>& point, Pred pred) {
+    if (point.empty()) return NAN;
+    double sum = 0;
+    for (auto [x, y] : point) sum += std::fabs(pred(x) / y - 1.0);
+    return 100.0 * sum / point.size();
 }
 
 }  // namespace fsst::search::prefilter::scan::bench

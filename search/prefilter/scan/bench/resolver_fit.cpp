@@ -3,7 +3,8 @@
 // of the stage-two cost model fitted to the rows. Mirrors onpair's
 // resolver_fit sweep; the paper's plot_resolver.py reads the CSV unchanged.
 //
-//   prefilter_resolver_sweep
+//   prefilter_resolver_sweep                 sweep, write the CSV, fit
+//   prefilter_resolver_sweep --refit [csv]   fit the newest CSV, or the one named
 //
 // Axes: the mask's hit density (needle sets of K = 1 and 16 at every target
 // selectivity) against the row length (the row layer with every `factor`
@@ -54,6 +55,14 @@ struct Row {
         double w = words(), e = emitted(), c = crossed();
         if (linear()) return {w, e, c, 0.0};
         return {w, 0.0, 0.0, e * std::log2(1.0 + c / e)};
+    }
+
+    static Row parse(const std::map<std::string, std::string>& f) {
+        return Row{f.at("stream"),          std::stoul(f.at("codes")),    std::stoul(f.at("rows")),
+                   std::stoul(f.at("codes_per_row")), f.at("resolver"),  std::stoul(f.at("length")),
+                   std::stoul(f.at("count")), std::stod(f.at("target")), std::stod(f.at("achieved")),
+                   std::stod(f.at("density")), std::stod(f.at("blocks_hit")), std::stod(f.at("selectivity")),
+                   std::stod(f.at("gbs")),   f.at("machine")};
     }
 
     std::string csv() const {
@@ -251,7 +260,15 @@ static void fit(std::vector<Row>& all) {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "--refit") {
+        auto path = csv_source("novel_resolve", argc >= 3 ? argv[2] : "");
+        std::vector<Row> rows;
+        for (auto& fields : read_csv(path)) rows.push_back(Row::parse(fields));
+        std::printf("%s\n%zu rows\n", path.c_str(), rows.size());
+        fit(rows);
+        return 0;
+    }
     std::string name = machine();
     std::vector<Row> rows;
     for (const char* stream : RESOLVER_STREAMS) measure(stream, name, rows);
