@@ -1,11 +1,8 @@
+# Header-only. The kernels are NEON, AVX-512BW or AVX2 by the build's flags:
+# on x86-64 build with -march=native for the machine that runs the result.
 add_library(fsst_search INTERFACE)
 target_include_directories(fsst_search INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(fsst_search INTERFACE cxx_std_17)
-# The kernels are NEON on aarch64 and AVX-512BW on x86-64; the tests and
-# tools run on the host, so its own set is what gets compiled.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    target_compile_options(fsst_search INTERFACE -mavx512f -mavx512bw)
-endif()
 
 add_executable(prefilter_matcher_tests prefilter/scan/matcher/tests.cpp)
 target_link_libraries(prefilter_matcher_tests fsst_search)

@@ -63,6 +63,20 @@ class EqOr {
         for (size_t k = 1; k < tokens_.size(); ++k) hit |= _mm512_cmpeq_epi8_mask(codes, tokens_[k]);
         return hit;
     }
+#elif defined(__AVX2__)
+    using Token = __m256i;
+
+    static Token broadcast(uint8_t code) { return _mm256_set1_epi8(static_cast<char>(code)); }
+
+    static Hits no_hits() { return {_mm256_setzero_si256(), _mm256_setzero_si256()}; }
+
+    Hits token_hits(Vectors codes) const {
+        Hits hit;
+        for (size_t i = 0; i < 2; ++i) hit[i] = _mm256_cmpeq_epi8(codes[i], tokens_[0]);
+        for (size_t k = 1; k < tokens_.size(); ++k)
+            for (size_t i = 0; i < 2; ++i) hit[i] = _mm256_or_si256(hit[i], _mm256_cmpeq_epi8(codes[i], tokens_[k]));
+        return hit;
+    }
 #endif
 
     struct Pair {
@@ -78,6 +92,13 @@ class EqOr {
 #elif defined(__AVX512BW__)
     static Hits pair_hits(Vectors v, Vectors next, const Pair& p) {
         return _mm512_cmpeq_epi8_mask(v, p.first) & _mm512_cmpeq_epi8_mask(next, p.second);
+    }
+#elif defined(__AVX2__)
+    static Hits pair_hits(Vectors v, Vectors next, const Pair& p) {
+        Hits hit;
+        for (size_t i = 0; i < 2; ++i)
+            hit[i] = _mm256_and_si256(_mm256_cmpeq_epi8(v[i], p.first), _mm256_cmpeq_epi8(next[i], p.second));
+        return hit;
     }
 #endif
 

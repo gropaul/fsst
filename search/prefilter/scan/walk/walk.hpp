@@ -195,4 +195,20 @@ struct WalkCheck {
     }
 };
 
+// The same, counting the rows the mask named before the walk decided them.
+// For instrumented callers; the plain WalkCheck does no bookkeeping.
+struct CountingWalkCheck {
+    WalkCheck inner;
+    mutable uint64_t rows = 0;
+    mutable size_t last_row = SIZE_MAX;
+
+    bool passes(size_t hit, size_t row_start, size_t row_end) const {
+        if (row_start != last_row) {
+            last_row = row_start;
+            ++rows;
+        }
+        return inner.passes(hit, row_start, row_end);
+    }
+};
+
 }  // namespace fsst::search::prefilter::scan

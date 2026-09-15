@@ -28,7 +28,7 @@ class Nibble {
 #if defined(__ARM_NEON)
         low_ = vld1q_u8(low);
         high_ = vld1q_u8(high);
-#elif defined(__AVX512BW__)
+#else
         low_ = broadcast_table(low);
         high_ = broadcast_table(high);
 #endif
@@ -77,6 +77,29 @@ class Nibble {
    private:
     __m512i low_;
     __m512i high_;
+#elif defined(__AVX2__)
+    bool check(const uint8_t* codes, Mask& bits) const {
+        const __m256i bit = broadcast_table(BIT);
+        const __m256i row = _mm256_set1_epi8(static_cast<char>(0x8f));
+        const __m256i half = _mm256_set1_epi8(static_cast<char>(0x80));
+        const __m256i nibble = _mm256_set1_epi8(0x0f);
+        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
+            Hits out;
+            for (size_t i = 0; i < 2; ++i) {
+                // bit 7 kept in the index: vpshufb returns 0 for the wrong half.
+                __m256i index = _mm256_and_si256(v[i], row);
+                __m256i rows = _mm256_or_si256(_mm256_shuffle_epi8(low_, index),
+                                               _mm256_shuffle_epi8(high_, _mm256_xor_si256(index, half)));
+                __m256i n1 = _mm256_and_si256(_mm256_srli_epi16(v[i], 4), nibble);
+                out[i] = nonzero(_mm256_and_si256(rows, _mm256_shuffle_epi8(bit, n1)));
+            }
+            return out;
+        });
+    }
+
+   private:
+    __m256i low_;
+    __m256i high_;
 #endif
 };
 

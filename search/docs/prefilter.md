@@ -667,7 +667,7 @@ draws it.
 
 | topic | decision |
 | --- | --- |
-| target | NEON and AVX-512BW, one explicit body per kernel under `#if defined(__ARM_NEON)` / `#elif defined(__AVX512BW__)` in the same files; on AVX-512 a compare answers into the mask word (`Hits = __mmask64`), the OR is `kor` and the movemask a store; the x86 build is compile-checked on the M4 with `clang++ -target x86_64-apple-darwin -mavx512f -mavx512bw`, its ctest run and the sweeps that fit the x86 policy rows still owed on an AVX-512 host; no AVX2 |
+| target | NEON, AVX-512BW and AVX2, one explicit body per kernel under `#if defined(__ARM_NEON)` / `#elif defined(__AVX512BW__)` / `#elif defined(__AVX2__)` in the same files, chosen at compile time by the build's flags (`-march=native` on the machine that runs the result; no runtime dispatch by the user's decision); on AVX-512 a compare answers into the mask word (`Hits = __mmask64`), the OR is `kor` and the movemask a store; AVX2 works in two `__m256i` with `vpmovmskb`, the unsigned range test as `max_epu8(x, w) == w`; the policy rows for both x86 sets are NEON's until `prefilter_matcher_sweep --refit` runs there; both x86 builds are compile-checked on the M4 by cross-compiling, their ctest runs are owed on x86 hosts |
 | input | flat code buffer plus u32 row offsets; the caller works in blocks and the offsets are what makes that possible |
 | chunking | removed from the compressor, AVX-512 compress path disabled (commit 3f46263 on this branch) |
 | escapes | escape-aware graph and walk (§9) |

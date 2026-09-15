@@ -8,13 +8,12 @@
 #include <array>
 #include <vector>
 
+#include "limits.hpp"
 #include "range.hpp"
 #include "shared.hpp"
 
 namespace fsst::search::prefilter::scan::matcher {
 
-constexpr size_t PER_BATCH = 8;
-constexpr size_t MAX_BATCHES = 1;
 
 // Token k owns bit 1 << k in the row each of its nibbles indexes.
 inline void batch_tables(const uint8_t* tokens, size_t count, uint8_t* low, uint8_t* high) {
@@ -88,6 +87,37 @@ inline Hits probe(const std::array<Batch, BATCHES>& batches, Vectors codes) {
         hit = _mm512_or_si512(hit, _mm512_and_si512(_mm512_shuffle_epi8(batches[b].low, n0),
                                                     _mm512_shuffle_epi8(batches[b].high, n1)));
     return _mm512_test_epi8_mask(hit, hit);
+}
+
+#elif defined(__AVX2__)
+
+struct Batch {
+    __m256i low;
+    __m256i high;
+};
+
+inline Batch batch(const uint8_t* tokens, size_t count) {
+    alignas(16) uint8_t low[16] = {};
+    alignas(16) uint8_t high[16] = {};
+    batch_tables(tokens, count, low, high);
+    return {broadcast_table(low), broadcast_table(high)};
+}
+
+template <size_t BATCHES>
+inline Hits probe(const std::array<Batch, BATCHES>& batches, Vectors codes) {
+    const __m256i nibble = _mm256_set1_epi8(0x0f);
+    Hits out;
+    for (size_t i = 0; i < 2; ++i) {
+        __m256i n0 = _mm256_and_si256(codes[i], nibble);
+        __m256i n1 = _mm256_and_si256(_mm256_srli_epi16(codes[i], 4), nibble);
+        __m256i hit = _mm256_and_si256(_mm256_shuffle_epi8(batches[0].low, n0),
+                                       _mm256_shuffle_epi8(batches[0].high, n1));
+        for (size_t b = 1; b < BATCHES; ++b)
+            hit = _mm256_or_si256(hit, _mm256_and_si256(_mm256_shuffle_epi8(batches[b].low, n0),
+                                                        _mm256_shuffle_epi8(batches[b].high, n1)));
+        out[i] = nonzero(hit);
+    }
+    return out;
 }
 
 #endif

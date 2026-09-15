@@ -41,6 +41,27 @@ inline Hits inside(Held h, Vectors codes) {
     return _mm512_cmple_epu8_mask(_mm512_sub_epi8(codes, h.lo), h.width);
 }
 
+#elif defined(__AVX2__)
+
+struct Held {
+    __m256i lo;
+    __m256i width;
+};
+
+inline Held hold(CodeRange r) {
+    return {_mm256_set1_epi8(static_cast<char>(r.begin)), _mm256_set1_epi8(static_cast<char>(r.last - r.begin))};
+}
+
+// No unsigned byte compare: x <= width iff max(x, width) == width.
+inline Hits inside(Held h, Vectors codes) {
+    Hits out;
+    for (size_t i = 0; i < 2; ++i) {
+        __m256i x = _mm256_sub_epi8(codes[i], h.lo);
+        out[i] = _mm256_cmpeq_epi8(_mm256_max_epu8(x, h.width), h.width);
+    }
+    return out;
+}
+
 #endif
 
 inline Hits check_ranges(Hits hit, const std::vector<Held>& held, Vectors codes) {

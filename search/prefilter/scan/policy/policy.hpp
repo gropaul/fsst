@@ -11,7 +11,7 @@
 #include <cstdint>
 
 #include "../../cover.hpp"
-#include "../matcher/nibble_n8.hpp"
+#include "../matcher/limits.hpp"
 #include "../scan.hpp"
 
 namespace fsst::search::prefilter::scan::policy {
@@ -55,18 +55,39 @@ inline bool takes(Match m, Shape s) {
     return false;
 }
 
-// Fitted on aarch64 Apple M4 Pro neon, from novel_mask_2026-09-15_16-09-02.csv.
-// ns per code; k tokens, r ranges, p pairs.
+// ns per code; k tokens, r ranges, p pairs. One row set per kernel set,
+// picked by the build's flags like the kernels themselves.
 inline double ns_per_code(Match m, Shape s) {
     const double k = static_cast<double>(s.tokens);
     const double r = static_cast<double>(s.ranges);
     const double p = static_cast<double>(s.pairs);
+#if defined(__ARM_NEON)
+    // Fitted on aarch64 Apple M4 Pro neon, novel_mask_2026-09-15_16-09-02.csv.
     switch (m) {
         case Match::EqOr: return 0.00330 + 0.00721 * k + 0.01131 * r + 0.01674 * p;
         case Match::NibbleN8K: return 0.02449 + 0.01230 * r;
         case Match::Nibble: return 0.03860;
         case Match::Range: return 0.00350 + 0.01078 * r;
     }
+#elif defined(__AVX512BW__)
+    // NOT FITTED: the neon rows stand in until prefilter_matcher_sweep
+    // --refit runs on an AVX-512 host; paste its block here.
+    switch (m) {
+        case Match::EqOr: return 0.00330 + 0.00721 * k + 0.01131 * r + 0.01674 * p;
+        case Match::NibbleN8K: return 0.02449 + 0.01230 * r;
+        case Match::Nibble: return 0.03860;
+        case Match::Range: return 0.00350 + 0.01078 * r;
+    }
+#else
+    // NOT FITTED: the neon rows stand in until prefilter_matcher_sweep
+    // --refit runs on an AVX2 host; paste its block here.
+    switch (m) {
+        case Match::EqOr: return 0.00330 + 0.00721 * k + 0.01131 * r + 0.01674 * p;
+        case Match::NibbleN8K: return 0.02449 + 0.01230 * r;
+        case Match::Nibble: return 0.03860;
+        case Match::Range: return 0.00350 + 0.01078 * r;
+    }
+#endif
     return INFINITY;
 }
 

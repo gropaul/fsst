@@ -3,15 +3,17 @@
 // Load, OR, any and movemask around each kernel's compare, per instruction
 // set. NEON, u8 lanes: 64 codes are four vectors, hits are 0xFF/0x00 bytes.
 // AVX-512BW: 64 codes are one vector, a compare answers straight into the
-// mask word, so the OR is `kor` and the movemask is a store. Each kernel
-// file holds one explicit body per set under the same #if.
+// mask word, so the OR is `kor` and the movemask is a store. AVX2: 64 codes
+// are two vectors, hits are bytes as on NEON, the movemask is vpmovmskb.
+// Each kernel file holds one explicit body per set under the same #if; the
+// build's flags decide, -march=native on the machine that will run it.
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
-#elif defined(__AVX512BW__)
+#elif defined(__AVX512BW__) || defined(__AVX2__)
 #include <immintrin.h>
 #else
-#error "the vector matchers need NEON or AVX-512BW"
+#error "the vector matchers need NEON, AVX-512BW or AVX2: build with -march=native"
 #endif
 
 #include <array>
@@ -93,6 +95,62 @@ inline void movemask(uint64_t* bits, Hits a, Hits b) {
 // A 16-byte table in every 128-bit lane, where vpshufb looks.
 inline __m512i broadcast_table(const uint8_t* table) {
     return _mm512_broadcast_i32x4(_mm_loadu_si128(reinterpret_cast<const __m128i*>(table)));
+}
+
+template <bool SKIP_MOVEMASK_IF_NO_MATCH, typename HitsOf>
+bool words(const uint8_t* codes, Mask& bits, HitsOf hits) {
+    bool written = false;
+    for (size_t pair = 0; pair < BLOCK / 128; ++pair) {
+        const uint8_t* at = codes + pair * 128;
+        Hits a = hits(load(at), at);
+        Hits b = hits(load(at + 64), at + 64);
+        if (SKIP_MOVEMASK_IF_NO_MATCH && !any(a, b)) {
+            bits[2 * pair] = 0;
+            bits[2 * pair + 1] = 0;
+            continue;
+        }
+        written = true;
+        movemask(&bits[2 * pair], a, b);
+    }
+    return written;
+}
+
+#elif defined(__AVX2__)
+
+using Vectors = std::array<__m256i, 2>;
+using Hits = std::array<__m256i, 2>;
+
+inline Vectors load(const uint8_t* at) {
+    return {_mm256_loadu_si256(reinterpret_cast<const __m256i*>(at)),
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(at + 32))};
+}
+
+inline Hits or_hits(Hits a, Hits b) { return {_mm256_or_si256(a[0], b[0]), _mm256_or_si256(a[1], b[1])}; }
+
+inline bool any(Hits a, Hits b) {
+    __m256i x = _mm256_or_si256(_mm256_or_si256(a[0], a[1]), _mm256_or_si256(b[0], b[1]));
+    return _mm256_testz_si256(x, x) == 0;
+}
+
+inline uint64_t word(Hits h) {
+    return static_cast<uint32_t>(_mm256_movemask_epi8(h[0])) |
+           static_cast<uint64_t>(static_cast<uint32_t>(_mm256_movemask_epi8(h[1]))) << 32;
+}
+
+inline void movemask(uint64_t* bits, Hits a, Hits b) {
+    bits[0] = word(a);
+    bits[1] = word(b);
+}
+
+// 0xFF where the byte is nonzero: no byte test on AVX2, so compare against
+// zero and invert.
+inline __m256i nonzero(__m256i x) {
+    return _mm256_xor_si256(_mm256_cmpeq_epi8(x, _mm256_setzero_si256()), _mm256_set1_epi8(-1));
+}
+
+// A 16-byte table in both 128-bit lanes, where vpshufb looks.
+inline __m256i broadcast_table(const uint8_t* table) {
+    return _mm256_broadcastsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(table)));
 }
 
 template <bool SKIP_MOVEMASK_IF_NO_MATCH, typename HitsOf>
