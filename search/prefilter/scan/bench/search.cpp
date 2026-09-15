@@ -99,6 +99,13 @@ int main(int argc, char** argv) {
     std::printf("pattern '%s': cover %zu points, %zu ranges, covers %u codes (%.4f%%), planned %.0f us\n",
                 pattern.c_str(), a.cover.points.size(), a.cover.ranges.size(), a.covered_frequency,
                 100.0 * a.covered_frequency / static_cast<double>(a.total_frequency), a.scan_ns / 1e3);
+    for (uint8_t c : a.cover.points)
+        std::printf("  point %3u '%.*s' (%u codes)\n", c, static_cast<int>(dict.length(c)),
+                    reinterpret_cast<const char*>(dict.symbol(c)), freq.count[c]);
+    for (CodeRange r : a.cover.ranges)
+        std::printf("  range %3u-%3u '%.*s' .. '%.*s' (%u codes)\n", r.begin, r.last, static_cast<int>(dict.length(r.begin)),
+                    reinterpret_cast<const char*>(dict.symbol(r.begin)), static_cast<int>(dict.length(r.last)),
+                    reinterpret_cast<const char*>(dict.symbol(r.last)), freq.of_range(r));
     std::printf("exact    %8.0f us  %6.2f GB/s raw  %6.2f GB/s codes  %zu rows  %s\n", exact_s * 1e6,
                 raw_bytes / exact_s / 1e9, code_count / exact_s / 1e9, exact.size(), exact == want ? "== memmem" : "!= memmem");
     std::printf("superset %8.0f us  %6.2f GB/s raw  %6.2f GB/s codes  %zu rows\n", superset_s * 1e6,
