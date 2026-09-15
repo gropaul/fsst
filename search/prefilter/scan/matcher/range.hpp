@@ -37,7 +37,7 @@ class Range {
     }
 
     bool check(const uint8_t* codes, Mask& bits) const {
-        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v) {
+        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
             return check_ranges(inside(first_, v), rest_, v);
         });
     }

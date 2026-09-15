@@ -47,14 +47,15 @@ inline void movemask(uint64_t* bits, Hits a, Hits b) {
 }
 
 // Per pair of mask words: load 128 codes, hits on each 64, movemask both.
-// Returns whether any pair was written; a skipped pair is zeroed.
+// Returns whether any pair was written; a skipped pair is zeroed. `hits`
+// also gets the pointer its vectors came from, for a lagged load.
 template <bool SKIP_MOVEMASK_IF_NO_MATCH, typename HitsOf>
 bool words(const uint8_t* codes, Mask& bits, HitsOf hits) {
     bool written = false;
     for (size_t pair = 0; pair < BLOCK / 128; ++pair) {
         const uint8_t* at = codes + pair * 128;
-        Hits a = hits(load(at));
-        Hits b = hits(load(at + 64));
+        Hits a = hits(load(at), at);
+        Hits b = hits(load(at + 64), at + 64);
         if (SKIP_MOVEMASK_IF_NO_MATCH && !any(a, b)) {
             bits[2 * pair] = 0;
             bits[2 * pair + 1] = 0;

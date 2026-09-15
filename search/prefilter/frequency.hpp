@@ -36,9 +36,16 @@ struct Frequency {
         return sum;
     }
 
+    // Expected positions of the pair under code independence.
+    uint32_t pair_estimate(CodePair p) const {
+        if (total == 0) return 0;
+        return static_cast<uint32_t>(static_cast<uint64_t>(count[p.first]) * count[p.second] / total);
+    }
+
     uint32_t of_cover(const ProbeCover& cover) const {
         uint32_t sum = of_codes(cover.points);
         for (const CodeRange& r : cover.ranges) sum += of_range(r);
+        for (CodePair p : cover.pairs) sum += pair_estimate(p);
         return sum;
     }
 };

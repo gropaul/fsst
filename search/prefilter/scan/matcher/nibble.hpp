@@ -36,7 +36,7 @@ class Nibble {
         const uint8x16_t bit = vld1q_u8(BIT);
         const uint8x16_t row = vdupq_n_u8(0x8f);
         const uint8x16_t half = vdupq_n_u8(0x80);
-        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v) {
+        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
             Hits out;
             for (size_t i = 0; i < 4; ++i) {
                 // bit 7 kept in the index: vqtbl1q returns 0 for the wrong half.

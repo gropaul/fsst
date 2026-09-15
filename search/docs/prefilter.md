@@ -206,6 +206,21 @@ of one, every range itself, then `from_runs` sorts by `begin`, merges runs
 that overlap or abut, and files single-code runs as points and the rest as
 ranges. No membership table exists any more.
 
+**Pair probes (C++ only, `CutGraph::with_pairs` in `graph.hpp`).** The
+min cut runs on an unrolled copy of the graph: every interior node is
+copied once per edge entering it, so a copy knows the symbol that led to
+it. A `Point(b)` edge out of a copy entered by `Point(a)` becomes two
+edges in series, `Point(b)` then `Pair(a, b)`; a path through them is
+blocked by either, so the cut picks the cheaper and every cut stays a
+sound cover. Escape, Range and Set edges are copied as they are. A pair's
+frequency is the independence estimate `count[a]·count[b]/total`
+(decision 2026-09-15), its λ weight 2. The cover gets `pairs`, the bit
+lands on the first code, only `eq_or` compares pairs (`eq(v, a) & eq(v+1,
+b)` with a lagged load, the driver keeps one code past every block
+readable), and the walk is unchanged since the hit is a greedy step. The
+stream's last code pairs with padding; `both_stages` resets that bit to
+the plain membership test.
+
 ## 5. Min cut and the λ sweep (`mincut.rs`, `plan.rs`)
 
 **Min cut.** Dinic on `n + 1` nodes with CSR adjacency. A cuttable edge's
@@ -217,8 +232,8 @@ BFS. The solver is built once per graph and refilled per λ.
 **Sweep.** Unchanged from old:
 
 ```
-weight_λ(e) = frequency(e) + λ · (points(e) + 2 · ranges(e))
-              # Point (1,0), Range (0,1), Set(ids) (len,0), SetTooBig (0,0)
+weight_λ(e) = frequency(e) + λ · (points(e) + 2 · ranges(e) + 2 · pairs(e))
+              # Point (1,0), Range (0,1), Set(ids) (len,0), SetTooBig (0,0), Pair (0,0,1)
 ceiling = total_frequency
 narrowest = cut(weight_{ceiling+1}); price(narrowest)
 λ = 0; last = none
@@ -658,5 +673,6 @@ draws it.
 | order of work | stage one kernels, resolvers and the alignment graph first; the walk after; sequence probes later |
 | frequency index | one counting pass over the stream at analysis time, not timed |
 | location | new sources under `search/` in this repo, C++17, library target |
+| pair probes | in, via the unrolled cut graph (§4); pair frequency is the independence estimate; `eq_or` cost per pair is twice a token until the sweep gets P rows |
 | raw codes | sorted codes, written by the compressor: `fsst_sort_codes` permutes the codes at the write sites into byte order of their symbols (§3); a `Range` edge is one `CodeRange` weighing `(0, 1)`, a `Set` edge's weight counts the runs its codes merge to |
 | C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, exact `candidate_rows`, `superset_rows`, `MAX_PATTERN_LEN`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |

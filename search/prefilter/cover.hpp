@@ -14,18 +14,39 @@ struct CodeRange {
     bool contains(uint8_t code) const { return begin <= code && code <= last; }
 };
 
-// The codes the scan probes for: single codes and inclusive runs, disjoint.
+// Two adjacent codes: `first` at some position, `second` right after it.
+struct CodePair {
+    uint8_t first;
+    uint8_t second;
+
+    bool operator<(CodePair o) const { return first != o.first ? first < o.first : second < o.second; }
+    bool operator==(CodePair o) const { return first == o.first && second == o.second; }
+};
+
+// The codes the scan probes for: single codes and inclusive runs, disjoint,
+// plus code pairs. A pair's bit lands on its first code.
 struct ProbeCover {
     std::vector<uint8_t> points;
     std::vector<CodeRange> ranges;
+    std::vector<CodePair> pairs;
 
-    bool empty() const { return points.empty() && ranges.empty(); }
+    bool empty() const { return points.empty() && ranges.empty() && pairs.empty(); }
 
     bool contains(uint8_t code) const {
         for (uint8_t p : points)
             if (p == code) return true;
         for (const CodeRange& r : ranges)
             if (r.contains(code)) return true;
+        return false;
+    }
+
+    // Whether the scan sets the bit at i over codes[..end): a covered code,
+    // or the first of a covered pair whose second lies before `end`.
+    bool matches(const uint8_t* codes, size_t i, size_t end) const {
+        if (contains(codes[i])) return true;
+        if (i + 1 >= end) return false;
+        for (CodePair p : pairs)
+            if (codes[i] == p.first && codes[i + 1] == p.second) return true;
         return false;
     }
 

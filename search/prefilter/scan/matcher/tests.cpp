@@ -17,10 +17,11 @@ using namespace fsst::search::prefilter;
 using namespace fsst::search::prefilter::scan;
 using namespace fsst::search::prefilter::scan::matcher;
 
+// The kernel reads one code past the block for a pair's second.
 static Mask expected(const ProbeCover& cover, const uint8_t* codes) {
     Mask m{};
     for (size_t i = 0; i < BLOCK; ++i)
-        if (cover.contains(codes[i])) m[i / 64] |= uint64_t{1} << (i % 64);
+        if (cover.matches(codes, i, BLOCK + 1)) m[i / 64] |= uint64_t{1} << (i % 64);
     return m;
 }
 
@@ -35,20 +36,22 @@ static void agrees(const char* name, const ProbeCover& cover, const uint8_t* cod
     bits.fill(~uint64_t{0});
     bool may = matcher.check(codes, bits);
     Mask want = expected(cover, codes);
-    CHECK_MSG(bits == want, "%s: mask differs (K=%zu R=%zu)", name, cover.points.size(),
-              cover.ranges.size());
+    CHECK_MSG(bits == want, "%s: mask differs (K=%zu R=%zu P=%zu)", name, cover.points.size(), cover.ranges.size(),
+              cover.pairs.size());
     if (!may) CHECK_MSG(all_zero(want), "%s: promised an empty mask but the cover hits", name);
 }
 
 static void every_matcher(const ProbeCover& cover, const uint8_t* codes) {
     const size_t k = cover.points.size();
     const size_t r = cover.ranges.size();
-    agrees<Nibble<true>>("nibble skip", cover, codes);
-    agrees<Nibble<false>>("nibble", cover, codes);
-    if (k > 0) {
+    const size_t p = cover.pairs.size();
+    if (k > 0 || p > 0) {
         agrees<EqOr<true>>("eq_or skip", cover, codes);
         agrees<EqOr<false>>("eq_or", cover, codes);
     }
+    if (p > 0) return;
+    agrees<Nibble<true>>("nibble skip", cover, codes);
+    agrees<Nibble<false>>("nibble", cover, codes);
     if (k == 0 && r > 0) {
         agrees<Range<true>>("range skip", cover, codes);
         agrees<Range<false>>("range", cover, codes);
@@ -140,12 +143,32 @@ static void ranges_of_codes() {
     }
 }
 
+// Pairs alone, beside tokens, at the block seam and reading the padding.
+static void pairs_of_codes() {
+    Block codes = block(4);
+    for (size_t i = 0; i < BLOCK; i += 97) codes[i] = 0x21, codes[i + 1] = 0x22;
+    codes[BLOCK - 1] = 0x21;
+    codes[BLOCK] = 0x22;
+    ProbeCover pair{{}, {}, {{0x21, 0x22}}};
+    CHECK(expected(pair, codes.data())[BLOCK / 64 - 1] >> 63 == 1);
+    every_matcher(pair, codes.data());
+    every_matcher(ProbeCover{{0x50}, {}, {{0x21, 0x22}}}, codes.data());
+    every_matcher(ProbeCover{{}, {{0x60, 0x6f}}, {{0x21, 0x22}, {0x22, 0x21}}}, codes.data());
+    every_matcher(ProbeCover{{}, {}, {{0x21, 0x21}}}, codes.data());
+    codes[BLOCK] = 0x23;
+    CHECK(expected(pair, codes.data())[BLOCK / 64 - 1] >> 63 == 0);
+    every_matcher(pair, codes.data());
+}
+
 static void random_covers() {
     Rng rng{99};
     for (int trial = 0; trial < 200; ++trial) {
         Block codes = block(1000 + trial);
         ProbeCover cover;
         size_t k = rng.below(41);
+        size_t pairs = trial % 3 == 0 ? rng.below(4) : 0;
+        for (size_t i = 0; i < pairs; ++i)
+            cover.pairs.push_back({static_cast<uint8_t>(rng.next()), static_cast<uint8_t>(rng.next())});
         std::set<uint8_t> seen;
         while (cover.points.size() < k) {
             uint8_t c = static_cast<uint8_t>(rng.next());
@@ -158,6 +181,7 @@ static void random_covers() {
             cover.ranges.push_back({std::min(a, b), std::max(a, b)});
         }
         if (cover.empty()) cover.points.push_back(1);
+        if (!cover.pairs.empty() && cover.points.empty() && rng.below(2)) cover.points.clear();
         every_matcher(cover, codes.data());
     }
 }
@@ -168,7 +192,7 @@ static std::vector<size_t> rows_oracle(const ProbeCover& cover, const std::vecto
     std::vector<size_t> out;
     for (size_t row = 0; row + 1 < offsets.size(); ++row)
         for (size_t i = offsets[row]; i < offsets[row + 1]; ++i)
-            if (cover.contains(codes[i])) {
+            if (cover.matches(codes.data(), i, codes.size())) {
                 out.push_back(row);
                 break;
             }
@@ -203,9 +227,16 @@ static void the_driver_scans_every_block() {
         std::vector<uint8_t> codes(len);
         for (uint8_t& c : codes) c = static_cast<uint8_t>(rng.below(64));
         std::vector<uint32_t> offsets = ragged_offsets(len, rng);
-        for (ProbeCover cover : {ProbeCover{{7}, {}}, ProbeCover{{7, 9, 11}, {}},
-                                 ProbeCover{{}, {{20, 25}}}, ProbeCover{{1}, {{20, 25}, {60, 63}}},
-                                 ProbeCover{{200}, {}}}) {
+        for (ProbeCover cover : {ProbeCover{{7}, {}, {}}, ProbeCover{{7, 9, 11}, {}, {}},
+                                 ProbeCover{{}, {{20, 25}}, {}}, ProbeCover{{1}, {{20, 25}, {60, 63}}, {}},
+                                 ProbeCover{{200}, {}, {}}, ProbeCover{{}, {}, {{3, 5}}},
+                                 ProbeCover{{}, {}, {{codes.empty() ? uint8_t{0} : codes.back(), 0}}},
+                                 ProbeCover{{9}, {{40, 41}}, {{3, 5}, {5, 3}}}}) {
+            if (!cover.pairs.empty()) {
+                driver_agrees<EqOr<true>, resolver::GallopSeek<uint32_t>>("eq_or pairs gallop", cover, codes, offsets);
+                driver_agrees<EqOr<false>, resolver::LinearSeek<uint32_t>>("eq_or pairs linear", cover, codes, offsets);
+                continue;
+            }
             driver_agrees<Nibble<true>, resolver::GallopSeek<uint32_t>>("nibble gallop", cover, codes,
                                                                         offsets);
             driver_agrees<Nibble<false>, resolver::LinearSeek<uint32_t>>("nibble linear", cover, codes,
@@ -249,6 +280,7 @@ int main() {
     nibble_cross_products();
     both_halves_of_the_bitmap();
     ranges_of_codes();
+    pairs_of_codes();
     random_covers();
     the_driver_scans_every_block();
     padding_makes_no_candidate();

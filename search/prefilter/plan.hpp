@@ -1,9 +1,9 @@
 #pragma once
 
-// Pattern to probe cover: build the alignment graph, cut it under
-// frequency + lambda * (points + 2 * ranges) for a sweep of lambda, price
-// every distinct cut with scan_ns and keep the cheapest. See
-// docs/prefilter.md section 5.
+// Pattern to probe cover: build the alignment graph, unroll it for pairs,
+// cut it under frequency + lambda * (points + 2 * ranges + 2 * pairs) for a
+// sweep of lambda, price every distinct cut with scan_ns and keep the
+// cheapest. See docs/prefilter.md section 5.
 
 #include <algorithm>
 #include <cstdint>
@@ -24,12 +24,12 @@ struct Planned {
 };
 
 inline uint64_t weight_at(const Edge& e, uint64_t lambda) {
-    return e.frequency + lambda * (e.points + 2 * e.ranges);
+    return e.frequency + lambda * (e.points + 2 * e.ranges + 2 * e.pairs);
 }
 
 // The narrowest cut first, since no lambda passes it, then the ladder from
 // zero until it arrives there.
-inline Planned cheapest_cover(const AlignmentGraph& graph, const Frequency& freq, scan::policy::Region region) {
+inline Planned cheapest_cover(const CutGraph& graph, const Frequency& freq, scan::policy::Region region) {
     const uint64_t ceiling = freq.total;
     MinCut solver(graph);
     Planned best{};
@@ -64,7 +64,7 @@ inline Planned cheapest_cover(const AlignmentGraph& graph, const Frequency& freq
 inline Planned plan(const Dictionary& dict, const uint8_t* pattern, size_t n, const Frequency& freq,
                     size_t row_count) {
     AlignmentGraph graph = build_alignment_graph(dict, pattern, n, freq);
-    Planned p = cheapest_cover(graph, freq, scan::policy::Region{freq.total, row_count});
+    Planned p = cheapest_cover(CutGraph::with_pairs(graph, freq), freq, scan::policy::Region{freq.total, row_count});
     p.walk = scan::Walk(graph, pattern);
     return p;
 }

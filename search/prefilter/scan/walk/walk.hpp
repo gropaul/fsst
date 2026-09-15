@@ -50,6 +50,7 @@ class Walk {
                     for (uint8_t c : e.codes) steps.push_back({c, false, 0, from, to});
                     break;
                 case Probe::SetTooBig: nodes_[to].entry_len = static_cast<uint8_t>(to); break;
+                case Probe::Pair: break;  // the cut graph's; the walk reads the alignment graph
             }
         }
         std::sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) {

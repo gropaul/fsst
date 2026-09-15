@@ -30,14 +30,16 @@ static ProbeCover probe(size_t k, size_t r) {
 
 static void the_planned_matcher_takes_its_cover() {
     for (size_t k = 0; k <= 64; ++k)
-        for (size_t r = 0; r <= 8; ++r) {
-            if (k == 0 && r == 0) continue;
-            Shape s{k, r};
-            Match m = select_matcher(s);
-            CHECK_MSG(takes(m, s), "K=%zu R=%zu planned %s", k, r, name(m));
-            for (Match other : KERNELS)
-                if (takes(other, s)) CHECK_MSG(ns_per_code(m, s) <= ns_per_code(other, s), "K=%zu R=%zu", k, r);
-        }
+        for (size_t r = 0; r <= 8; ++r)
+            for (size_t p = 0; p <= 4; ++p) {
+                if (k == 0 && r == 0 && p == 0) continue;
+                Shape s{k, r, p};
+                Match m = select_matcher(s);
+                CHECK_MSG(takes(m, s), "K=%zu R=%zu P=%zu planned %s", k, r, p, name(m));
+                if (p > 0) CHECK(m == Match::EqOr);
+                for (Match other : KERNELS)
+                    if (takes(other, s)) CHECK_MSG(ns_per_code(m, s) <= ns_per_code(other, s), "K=%zu R=%zu", k, r);
+            }
 }
 
 // The ladder the fitted rows give on NEON at u8 width.
@@ -99,7 +101,7 @@ static std::vector<size_t> rows_oracle(const ProbeCover& cover, const std::vecto
     std::vector<size_t> out;
     for (size_t row = 0; row + 1 < offsets.size(); ++row)
         for (size_t i = offsets[row]; i < offsets[row + 1]; ++i)
-            if (cover.contains(codes[i])) {
+            if (cover.matches(codes.data(), i, codes.size())) {
                 out.push_back(row);
                 break;
             }
@@ -115,7 +117,8 @@ static void the_planned_scan_agrees_with_the_rows() {
     while (offsets.back() < codes.size())
         offsets.push_back(static_cast<uint32_t>(std::min<size_t>(codes.size(), offsets.back() + rng.below(20) + 1)));
     for (ProbeCover cover : {probe(1, 0), probe(2, 0), probe(3, 0), probe(9, 0), probe(0, 1), probe(0, 4),
-                             probe(1, 1), probe(1, 3), ProbeCover{{200}, {}}, ProbeCover{{}, {{0, 47}}}}) {
+                             probe(1, 1), probe(1, 3), ProbeCover{{200}, {}, {}}, ProbeCover{{}, {{0, 47}}, {}},
+                             ProbeCover{{}, {}, {{3, 4}}}, ProbeCover{{1}, {{40, 41}}, {{3, 4}, {4, 3}}}}) {
         auto want = rows_oracle(cover, codes, offsets);
         for (size_t covered : {size_t{0}, size_t{5}, codes.size() / 100, codes.size() / 2}) {
             std::vector<size_t> got;

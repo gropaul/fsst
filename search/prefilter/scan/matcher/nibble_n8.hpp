@@ -68,7 +68,7 @@ class NibbleN8 {
     }
 
     bool check(const uint8_t* codes, Mask& bits) const {
-        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v) {
+        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
             return check_ranges(probe(batches_, v), ranges_, v);
         });
     }

@@ -25,8 +25,9 @@ constexpr size_t PROBE_SET_SIZE_LIMIT_K1 = 16;
 // is a prefix of, into the sink, one code range since the codes are in byte
 // order. Set: an alignment's first symbols out of the source, or the
 // symbols holding the whole needle past their start. SetTooBig: an
-// alignment whose set was not enumerated; a cut may not select it.
-enum class Probe : uint8_t { Point, Escape, Range, Set, SetTooBig };
+// alignment whose set was not enumerated; a cut may not select it. Pair:
+// two consecutive greedy symbols, only in the cut graph of CutGraph::with_pairs.
+enum class Probe : uint8_t { Point, Escape, Range, Set, SetTooBig, Pair };
 
 struct Edge {
     uint32_t from;
@@ -35,9 +36,11 @@ struct Edge {
     uint8_t byte;                // Escape only: the literal after the marker
     std::vector<uint8_t> codes;  // Point, Escape, Set: ascending, one for Point and Escape
     CodeRange range;             // Range only
-    uint32_t frequency;          // codes the probe matches in the stream
-    uint32_t points;             // the lambda weight's terms: runs the codes merge to, or one range
+    CodePair pair;               // Pair only
+    uint32_t frequency;          // codes the probe matches in the stream; an estimate for a pair
+    uint32_t points;             // the lambda weight's terms: runs the codes merge to, one range, one pair
     uint32_t ranges;
+    uint32_t pairs;
 
     bool cuttable() const { return probe != Probe::SetTooBig; }
 };
@@ -54,13 +57,82 @@ struct AlignmentGraph {
 // The cover a cut's probes form: every code a run of one, merged by from_runs.
 inline ProbeCover from_edge_cut(const std::vector<const Edge*>& cut) {
     std::vector<CodeRange> runs;
+    std::vector<CodePair> pairs;
     for (const Edge* e : cut) {
         assert(e->cuttable());
         if (e->probe == Probe::Range) runs.push_back(e->range);
+        if (e->probe == Probe::Pair) pairs.push_back(e->pair);
         for (uint8_t c : e->codes) runs.push_back({c, c});
     }
-    return ProbeCover::from_runs(std::move(runs));
+    ProbeCover cover = ProbeCover::from_runs(std::move(runs));
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    cover.pairs = std::move(pairs);
+    return cover;
 }
+
+// What the min cut runs on: the alignment graph as is, or unrolled one step
+// so a greedy symbol may be probed together with the symbol before it.
+struct CutGraph {
+    std::vector<Edge> edges;
+    size_t node_count;
+    uint32_t source;
+    uint32_t sink;
+
+    static CutGraph plain(const AlignmentGraph& g) { return CutGraph{g.edges, g.node_count(), g.source(), g.sink()}; }
+
+    // Every node except source and sink is copied once per edge entering it,
+    // so a copy knows the symbol that led to it. A Point edge b out of a copy
+    // entered by Point a becomes two edges in series, Point(b) then Pair(a,
+    // b): a path through them is blocked by either, and the cut takes the
+    // cheaper. Paths are otherwise those of g, so every cut is still a sound
+    // cover.
+    static CutGraph with_pairs(const AlignmentGraph& g, const Frequency& freq) {
+        const size_t n = g.needle_len;
+        std::vector<std::vector<size_t>> into(n + 1);
+        for (size_t at = 0; at < g.edges.size(); ++at) into[g.edges[at].to].push_back(at);
+        std::vector<std::vector<uint32_t>> copy_id(n + 1);  // per node, one copy per edge into it
+        uint32_t next = 1;
+        for (size_t v = 1; v < n; ++v)
+            for (size_t j = 0; j < into[v].size(); ++j) copy_id[v].push_back(next++);
+        const uint32_t sink = next++;
+        CutGraph cg{{}, 0, 0, sink};
+        for (size_t at = 0; at < g.edges.size(); ++at) {
+            const Edge& e = g.edges[at];
+            uint32_t target = sink;
+            if (e.to != n) {
+                size_t j = std::find(into[e.to].begin(), into[e.to].end(), at) - into[e.to].begin();
+                target = copy_id[e.to][j];
+            }
+            std::vector<std::pair<uint32_t, const Edge*>> copies;
+            if (e.from == 0)
+                copies.push_back({0u, nullptr});
+            else
+                for (size_t j = 0; j < into[e.from].size(); ++j)
+                    copies.push_back({copy_id[e.from][j], &g.edges[into[e.from][j]]});
+            for (auto [cu, entered_by] : copies) {
+                bool pairable = e.probe == Probe::Point && entered_by != nullptr && entered_by->probe == Probe::Point;
+                if (!pairable) {
+                    Edge copy = e;
+                    copy.from = cu;
+                    copy.to = target;
+                    cg.edges.push_back(std::move(copy));
+                    continue;
+                }
+                uint32_t mid = next++;
+                Edge point = e;
+                point.from = cu;
+                point.to = mid;
+                cg.edges.push_back(std::move(point));
+                CodePair pair{entered_by->codes[0], e.codes[0]};
+                cg.edges.push_back(Edge{mid, target, Probe::Pair, 0, {}, CodeRange{0, 0}, pair, freq.pair_estimate(pair),
+                                        0, 0, 1});
+            }
+        }
+        cg.node_count = next;
+        return cg;
+    }
+};
 
 // For each alignment k >= 1, the symbols whose last k bytes are needle[..k]
 // and are longer than k, and the symbols holding the whole needle at an
@@ -114,14 +186,14 @@ struct Builder {
         std::vector<CodeRange> runs;
         for (uint8_t c : codes) runs.push_back({c, c});
         ProbeCover shape = ProbeCover::from_runs(runs);
-        Edge e{from, to, probe, byte, std::move(codes), CodeRange{0, 0}, 0,
-               static_cast<uint32_t>(shape.points.size()), static_cast<uint32_t>(shape.ranges.size())};
+        Edge e{from, to, probe, byte, std::move(codes), CodeRange{0, 0}, CodePair{0, 0}, 0,
+               static_cast<uint32_t>(shape.points.size()), static_cast<uint32_t>(shape.ranges.size()), 0};
         e.frequency = freq.of_codes(e.codes);
         edges.push_back(std::move(e));
     }
 
     void add_range(uint32_t from, uint32_t to, CodeRange range) {
-        edges.push_back(Edge{from, to, Probe::Range, 0, {}, range, freq.of_range(range), 0, 1});
+        edges.push_back(Edge{from, to, Probe::Range, 0, {}, range, CodePair{0, 0}, freq.of_range(range), 0, 1, 0});
     }
 
     // The symbols needle[o..] is a prefix of, the exact one included.

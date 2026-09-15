@@ -85,16 +85,16 @@ static std::vector<size_t> rows_containing(const Column& col, const std::string&
 static const uint8_t* bytes(const std::string& s) { return reinterpret_cast<const uint8_t*>(s.data()); }
 
 template <typename Blocked>
-static bool sink_reachable_avoiding(const AlignmentGraph& g, Blocked blocked) {
-    std::vector<std::vector<const Edge*>> adjacency(g.node_count());
+static bool sink_reachable_avoiding(const CutGraph& g, Blocked blocked) {
+    std::vector<std::vector<const Edge*>> adjacency(g.node_count);
     for (const Edge& e : g.edges) adjacency[e.from].push_back(&e);
-    std::vector<bool> seen(g.node_count(), false);
-    std::vector<size_t> stack{g.source()};
-    seen[g.source()] = true;
+    std::vector<bool> seen(g.node_count, false);
+    std::vector<size_t> stack{g.source};
+    seen[g.source] = true;
     while (!stack.empty()) {
         size_t node = stack.back();
         stack.pop_back();
-        if (node == g.sink()) return true;
+        if (node == g.sink) return true;
         for (const Edge* e : adjacency[node])
             if (!seen[e->to] && !blocked(*e)) {
                 seen[e->to] = true;
@@ -108,14 +108,19 @@ static bool selected(const std::vector<const Edge*>& selection, const Edge& e) {
     return std::find(selection.begin(), selection.end(), &e) != selection.end();
 }
 
+// Pairs are read within the row: stricter than the scan, which also pairs
+// across a row boundary and lets the walk reject that.
+static bool row_holds(const Column& col, const ProbeCover& cover, size_t row) {
+    for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i)
+        if (cover.matches(col.codes.data(), i, col.offsets[row + 1])) return true;
+    return false;
+}
+
 static bool covers_every_match(const Column& col, const std::vector<const Edge*>& selection,
                                const std::vector<size_t>& want) {
     ProbeCover cover = from_edge_cut(selection);
-    for (size_t row : want) {
-        bool holds = false;
-        for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i) holds |= cover.contains(col.codes[i]);
-        if (!holds) return false;
-    }
+    for (size_t row : want)
+        if (!row_holds(col, cover, row)) return false;
     return true;
 }
 
@@ -123,46 +128,32 @@ static uint64_t by_frequency(const Edge& e) { return e.frequency; }
 
 static size_t g_escape_edges = 0;
 
-static void check_graph(const Column& col, const std::string& pat, const std::vector<size_t>& want) {
-    const size_t n = pat.size();
-    AlignmentGraph g = build_alignment_graph(col.dict, bytes(pat), n, col.freq);
+// The cut graph's invariants: no unprobed path, honest weights, the weakest
+// and the minimum cut both sound, the minimum cut optimal while small.
+static void check_cut_graph(const Column& col, const std::string& pat, const std::vector<size_t>& want,
+                            const CutGraph& g) {
     std::vector<const Edge*> probes;
     for (const Edge& e : g.edges) {
-        CHECK_MSG(e.from < e.to && e.to <= n, "%s: edge %u -> %u", pat.c_str(), e.from, e.to);
-        if (e.probe == Probe::Escape) {
-            ++g_escape_edges;
-            CHECK(e.to == e.from + 1 && e.codes.size() == 1 && e.codes[0] == ESCAPE && e.byte == bytes(pat)[e.from]);
-        }
-        if (e.probe == Probe::Range) {
-            CHECK(e.codes.empty() && e.points == 0 && e.ranges == 1 && e.range.begin <= e.range.last);
-            // Exactly the symbols the suffix is a prefix of, contiguous because the codes are sorted.
-            size_t m = n - e.from;
-            for (size_t c = 0; c < col.dict.count; ++c) {
-                bool prefixed = col.dict.length(c) >= m && std::memcmp(col.dict.symbol(c), bytes(pat) + e.from, m) == 0;
-                CHECK_MSG(prefixed == e.range.contains(static_cast<uint8_t>(c)), "%s: range %u-%u at code %zu",
-                          pat.c_str(), e.range.begin, e.range.last, c);
-            }
-        } else {
-            ProbeCover shape = ProbeCover::from_runs([&] {
-                std::vector<CodeRange> runs;
-                for (uint8_t c : e.codes) runs.push_back({c, c});
-                return runs;
-            }());
-            CHECK(e.points == shape.points.size() && e.ranges == shape.ranges.size());
+        CHECK_MSG(e.from != e.to && e.from < g.node_count && e.to < g.node_count && e.from != g.sink &&
+                      e.to != g.source,
+                  "%s: cut edge %u -> %u", pat.c_str(), e.from, e.to);
+        if (e.probe == Probe::Pair) {
+            CHECK(e.codes.empty() && e.points == 0 && e.ranges == 0 && e.pairs == 1);
+            CHECK(e.frequency == col.freq.pair_estimate(e.pair));
         }
         if (e.cuttable()) probes.push_back(&e);
     }
     CHECK_MSG(!sink_reachable_avoiding(g, [](const Edge& e) { return e.cuttable(); }),
               "%s: a source-to-sink path carries no probe", pat.c_str());
     for (const Edge* e : probes) {
+        if (e->probe == Probe::Pair) continue;
         ProbeCover cover = from_edge_cut({e});
         size_t matched = 0;
         for (uint8_t c : col.codes) matched += cover.contains(c);
         CHECK_MSG(e->frequency == matched, "%s: probe %u -> %u reports %u, matches %zu", pat.c_str(), e->from, e->to,
                   e->frequency, matched);
     }
-    CHECK_MSG(covers_every_match(col, probes, want), "%s: a matching row holds no probe code at all", pat.c_str());
-    CHECK_MSG(g.edges.size() <= 2 * n + 16, "%s: %zu edges", pat.c_str(), g.edges.size());
+    CHECK_MSG(covers_every_match(col, probes, want), "%s: a matching row holds no probe at all", pat.c_str());
 
     std::vector<const Edge*> cut = min_cut(g, by_frequency);
     CHECK_MSG(!sink_reachable_avoiding(g, [&](const Edge& e) { return selected(cut, e); }),
@@ -188,6 +179,45 @@ static void check_graph(const Column& col, const std::string& pat, const std::ve
     }
 }
 
+static size_t g_pair_edges = 0;
+
+static void check_graph(const Column& col, const std::string& pat, const std::vector<size_t>& want) {
+    const size_t n = pat.size();
+    AlignmentGraph g = build_alignment_graph(col.dict, bytes(pat), n, col.freq);
+    for (const Edge& e : g.edges) {
+        CHECK_MSG(e.from < e.to && e.to <= n, "%s: edge %u -> %u", pat.c_str(), e.from, e.to);
+        CHECK(e.probe != Probe::Pair);
+        if (e.probe == Probe::Escape) {
+            ++g_escape_edges;
+            CHECK(e.to == e.from + 1 && e.codes.size() == 1 && e.codes[0] == ESCAPE && e.byte == bytes(pat)[e.from]);
+        }
+        if (e.probe == Probe::Range) {
+            CHECK(e.codes.empty() && e.points == 0 && e.ranges == 1 && e.range.begin <= e.range.last);
+            // Exactly the symbols the suffix is a prefix of, contiguous because the codes are sorted.
+            size_t m = n - e.from;
+            for (size_t c = 0; c < col.dict.count; ++c) {
+                bool prefixed = col.dict.length(c) >= m && std::memcmp(col.dict.symbol(c), bytes(pat) + e.from, m) == 0;
+                CHECK_MSG(prefixed == e.range.contains(static_cast<uint8_t>(c)), "%s: range %u-%u at code %zu",
+                          pat.c_str(), e.range.begin, e.range.last, c);
+            }
+        } else {
+            ProbeCover shape = ProbeCover::from_runs([&] {
+                std::vector<CodeRange> runs;
+                for (uint8_t c : e.codes) runs.push_back({c, c});
+                return runs;
+            }());
+            CHECK(e.points == shape.points.size() && e.ranges == shape.ranges.size());
+        }
+    }
+    CHECK_MSG(g.edges.size() <= 2 * n + 16, "%s: %zu edges", pat.c_str(), g.edges.size());
+    check_cut_graph(col, pat, want, CutGraph::plain(g));
+    CutGraph paired = CutGraph::with_pairs(g, col.freq);
+    for (const Edge& e : paired.edges) g_pair_edges += e.probe == Probe::Pair;
+    // Unrolling keeps every edge of the plain graph at least once.
+    CHECK(paired.edges.size() >= g.edges.size());
+    check_cut_graph(col, pat, want, paired);
+}
+
 // Every pattern against byte containment: the graph's invariants, then the
 // planned cover run as a superset.
 static void check(const Column& col, const std::vector<std::string>& patterns) {
@@ -209,8 +239,9 @@ static void check(const Column& col, const std::vector<std::string>& patterns) {
                   pat.c_str());
         for (size_t row : got) {
             bool holds = false;
-            for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i) holds |= a.cover.contains(col.codes[i]);
-            CHECK_MSG(holds, "%s: row %zu emitted without a covered code", pat.c_str(), row);
+            for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i)
+                holds |= a.cover.matches(col.codes.data(), i, col.codes.size());
+            CHECK_MSG(holds, "%s: row %zu emitted without a covered code or pair", pat.c_str(), row);
         }
         if (!want.empty()) CHECK_MSG(!a.cover.empty(), "%s: empty cover with matching rows", pat.c_str());
         std::vector<size_t> exact;
@@ -313,6 +344,7 @@ static void sound_with_escapes_inside_the_needle() {
     check(col, {std::string(1, '\x80'), "page\x80", "\x80\x81page", "e\x80\x81p", "\x90user", "user=1\x91",
                 std::string("\xff\xff", 2), "x\xff", "\xffy", "\x80\x80", "b\x80", rare.substr(3, 9)});
     CHECK_MSG(g_escape_edges > before, "no pattern built an escape edge");
+    CHECK_MSG(g_pair_edges > 0, "no pattern built a pair edge");
 }
 
 static void empty_probe_cover_appends_nothing() {
@@ -360,9 +392,10 @@ static void sweep_prices_at_or_below_the_frequency_cut() {
     scan::policy::Region region{col.codes.size(), col.row_count()};
     for (std::string pat : {"e", "://", ".com/page", "https://www.example.com", "user=1"}) {
         AlignmentGraph g = build_alignment_graph(col.dict, bytes(pat), pat.size(), col.freq);
-        ProbeCover baseline = from_edge_cut(min_cut(g, by_frequency));
+        CutGraph cg = CutGraph::with_pairs(g, col.freq);
+        ProbeCover baseline = from_edge_cut(min_cut(cg, by_frequency));
         double baseline_ns = scan::policy::scan_ns(baseline, col.freq.of_cover(baseline), region);
-        Planned p = cheapest_cover(g, col.freq, region);
+        Planned p = cheapest_cover(cg, col.freq, region);
         CHECK(p.covered == col.freq.of_cover(p.cover));
         CHECK(p.scan_ns == scan::policy::scan_ns(p.cover, p.covered, region));
         CHECK_MSG(p.scan_ns <= baseline_ns, "%s: sweep %f against %f", pat.c_str(), p.scan_ns, baseline_ns);
@@ -371,8 +404,8 @@ static void sweep_prices_at_or_below_the_frequency_cut() {
 
 // Synthetic graphs for the cut alone. Uncuttable steps are SetTooBig.
 static Edge synthetic(uint32_t from, uint32_t to, int64_t frequency) {
-    if (frequency < 0) return Edge{from, to, Probe::SetTooBig, 0, {}, CodeRange{0, 0}, 0, 0, 0};
-    return Edge{from, to, Probe::Point, 0, {0}, CodeRange{0, 0}, static_cast<uint32_t>(frequency), 1, 0};
+    if (frequency < 0) return Edge{from, to, Probe::SetTooBig, 0, {}, CodeRange{0, 0}, CodePair{0, 0}, 0, 0, 0, 0};
+    return Edge{from, to, Probe::Point, 0, {0}, CodeRange{0, 0}, CodePair{0, 0}, static_cast<uint32_t>(frequency), 1, 0, 0};
 }
 
 using Steps = std::vector<std::pair<uint32_t, uint32_t>>;
@@ -384,22 +417,20 @@ static Steps steps(const std::vector<const Edge*>& cut) {
 }
 
 static void shared_suffix_beats_two_local_choices() {
-    AlignmentGraph g{{synthetic(0, 1, -1), synthetic(0, 2, -1), synthetic(1, 3, 4), synthetic(2, 3, 4),
-                      synthetic(3, 4, 6)},
-                     4};
+    CutGraph g{{synthetic(0, 1, -1), synthetic(0, 2, -1), synthetic(1, 3, 4), synthetic(2, 3, 4), synthetic(3, 4, 6)},
+               5, 0, 4};
     CHECK(steps(min_cut(g, by_frequency)) == Steps({{3, 4}}));
 }
 
 static void disjoint_paths_are_cut_separately() {
-    AlignmentGraph g{{synthetic(0, 1, -1), synthetic(1, 4, 5), synthetic(0, 2, -1), synthetic(2, 3, 9),
-                      synthetic(3, 4, 0)},
-                     4};
+    CutGraph g{{synthetic(0, 1, -1), synthetic(1, 4, 5), synthetic(0, 2, -1), synthetic(2, 3, 9), synthetic(3, 4, 0)},
+               5, 0, 4};
     CHECK(steps(min_cut(g, by_frequency)) == Steps({{1, 4}, {3, 4}}));
 }
 
 static void deep_chain_does_not_exhaust_the_stack() {
     const uint32_t len = 100000;
-    AlignmentGraph g{{}, len - 1};
+    CutGraph g{{}, len, 0, len - 1};
     for (uint32_t v = 0; v + 1 < len; ++v) g.edges.push_back(synthetic(v, v + 1, 7));
     g.edges[len / 2] = synthetic(len / 2, len / 2 + 1, 3);
     CHECK(steps(min_cut(g, by_frequency)) == Steps({{len / 2, len / 2 + 1}}));

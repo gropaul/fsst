@@ -26,8 +26,9 @@ struct Facts {
 struct Shape {
     size_t tokens;
     size_t ranges;
+    size_t pairs = 0;
 
-    static Shape of(const ProbeCover& cover) { return {cover.points.size(), cover.ranges.size()}; }
+    static Shape of(const ProbeCover& cover) { return {cover.points.size(), cover.ranges.size(), cover.pairs.size()}; }
 };
 
 enum class Match { EqOr, Range, NibbleN8K, Nibble };
@@ -43,23 +44,29 @@ constexpr Match KERNELS[] = {Match::EqOr, Match::Range, Match::NibbleN8K, Match:
 
 inline size_t batches(Shape s) { return (s.tokens + matcher::PER_BATCH - 1) / matcher::PER_BATCH; }
 
+// Only eq_or compares pairs.
 inline bool takes(Match m, Shape s) {
     switch (m) {
-        case Match::EqOr: return s.tokens > 0;
-        case Match::Range: return s.tokens == 0 && s.ranges > 0;
-        case Match::NibbleN8K: return s.tokens > 0 && batches(s) <= matcher::MAX_BATCHES;
-        case Match::Nibble: return true;
+        case Match::EqOr: return s.tokens > 0 || s.pairs > 0;
+        case Match::Range: return s.tokens == 0 && s.pairs == 0 && s.ranges > 0;
+        case Match::NibbleN8K: return s.pairs == 0 && s.tokens > 0 && batches(s) <= matcher::MAX_BATCHES;
+        case Match::Nibble: return s.pairs == 0;
     }
     return false;
 }
 
+// A pair is two compares and an AND on eq_or: taken as twice a token until
+// the sweep's P rows are fitted.
+constexpr double EQ_OR_PAIR_NS = 0.01566;
+
 // Fitted on aarch64 Apple M4 Pro neon, from novel_mask_2026-09-15_14-05-04.csv.
-// ns per code; k tokens, r ranges.
+// ns per code; k tokens, r ranges, p pairs.
 inline double ns_per_code(Match m, Shape s) {
     const double k = static_cast<double>(s.tokens);
     const double r = static_cast<double>(s.ranges);
+    const double p = static_cast<double>(s.pairs);
     switch (m) {
-        case Match::EqOr: return 0.00351 + 0.00783 * k + 0.01151 * r;
+        case Match::EqOr: return 0.00351 + 0.00783 * k + 0.01151 * r + EQ_OR_PAIR_NS * p;
         case Match::NibbleN8K: return 0.02681 + 0.01239 * r;
         case Match::Nibble: return 0.04248;
         case Match::Range: return 0.00361 + 0.01171 * r;

@@ -133,13 +133,13 @@ class Dinic {
 
 class MinCut {
   public:
-    explicit MinCut(const AlignmentGraph& graph) : flow_(graph.node_count(), graph.edges) {}
+    explicit MinCut(const CutGraph& graph) : flow_(graph.node_count, graph.edges) {}
 
     // The cheapest set of cuttable edges disconnecting source from sink, as
     // ascending indices into graph.edges. `weight(edge)` is read for
     // cuttable edges only; the others get one more than every finite cut.
     template <typename Weight>
-    const std::vector<uint32_t>& solve(const AlignmentGraph& graph, Weight weight) {
+    const std::vector<uint32_t>& solve(const CutGraph& graph, Weight weight) {
         uint64_t finite = 0;
         for (const Edge& e : graph.edges)
             if (e.cuttable()) finite += weight(e);
@@ -148,7 +148,7 @@ class MinCut {
             const Edge& e = graph.edges[at];
             return e.cuttable() ? weight(e) : infinite;
         });
-        uint64_t value = flow_.max_flow(graph.source(), graph.sink());
+        uint64_t value = flow_.max_flow(graph.source, graph.sink);
         assert(value < infinite && "a source-to-sink path carries no probe");
         (void)value;
         cut_.clear();
@@ -165,7 +165,7 @@ class MinCut {
 };
 
 template <typename Weight>
-std::vector<const Edge*> min_cut(const AlignmentGraph& graph, Weight weight) {
+std::vector<const Edge*> min_cut(const CutGraph& graph, Weight weight) {
     MinCut solver(graph);
     std::vector<const Edge*> cut;
     for (uint32_t at : solver.solve(graph, weight)) cut.push_back(&graph.edges[at]);
