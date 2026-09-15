@@ -23,7 +23,6 @@
 #include "../matcher/nibble.hpp"
 #include "../matcher/nibble_n8.hpp"
 #include "../matcher/range.hpp"
-#include "../matcher/table.hpp"
 #include "../resolver/linear_seek.hpp"
 #include "../scan.hpp"
 #include "loader.hpp"
@@ -60,7 +59,7 @@ struct Row {
         if (matcher == "eq_or") return std::pair{static_cast<double>(count), "K"};
         if (matcher == "nibble_n8k") return std::pair{static_cast<double>(batches()), "B"};
         if (matcher == "range") return std::pair{static_cast<double>(ranges), "R"};
-        if (matcher == "table" || matcher == "nibble") return std::pair{0.0, ""};
+        if (matcher == "nibble") return std::pair{0.0, ""};
         return std::nullopt;
     }
 
@@ -195,7 +194,6 @@ static std::vector<Kernel> kernels() {
     auto tokens = [](size_t k, size_t) { return k > 0; };
     auto ranges_alone = [](size_t k, size_t r) { return k == 0 && r > 0; };
     return {
-        {"table", only_if<matcher::Table>(any)},
         {"eq_or", only_if<matcher::EqOr<false>>(tokens)},
         {"eq_or_skip", only_if<matcher::EqOr<true>>(tokens)},
         {"range", only_if<matcher::Range<false>>(ranges_alone)},
@@ -255,7 +253,7 @@ static void measure(const std::string& stream, const std::vector<Kernel>& kernel
 // a range adds to the kernels that fold them in.
 struct Fit {
     std::optional<std::pair<double, double>> eq_or, range, nibble_n8k;
-    std::optional<double> table, nibble;
+    std::optional<double> nibble;
     double beside = 0, beside_n8k = 0;
     double ceiling = 0;
 };
@@ -284,7 +282,6 @@ static std::vector<std::pair<double, double>> points(const std::vector<const Row
 static void snippet(const std::string& machine, const std::string& source, const Fit& fit) {
     std::printf("\n// Fitted on %s, from %s. ns per code; k tokens, r ranges, b = ceil(k / 8).\n", machine.c_str(),
                 source.c_str());
-    if (fit.table) std::printf("case Match::Table:     return %.3f;\n", *fit.table);
     if (fit.eq_or)
         std::printf("case Match::EqOr:      return %.5f + %.5f * k + %.5f * r;\n", fit.eq_or->first, fit.eq_or->second,
                     fit.beside);
@@ -310,7 +307,7 @@ static void fit(const std::vector<Row>& all, const std::string& source) {
         Fit fit;
         std::printf("\n%s  up to %zu codes\n", machine.c_str(), codes);
         std::printf("  %-13s %-26s %6s\n", "kernel", "fitted ns/code", "fit%");
-        for (const char* kernel : {"eq_or", "range", "nibble_n8k", "nibble", "table"}) {
+        for (const char* kernel : {"eq_or", "range", "nibble_n8k", "nibble"}) {
             std::vector<const Row*> own = alone(rows, kernel);
             std::vector<std::pair<double, double>> point = points(own);
             if (point.empty()) continue;
@@ -323,7 +320,6 @@ static void fit(const std::vector<Row>& all, const std::string& source) {
             if (kernel_name == "range") fit.range = {a, b};
             if (kernel_name == "nibble_n8k") fit.nibble_n8k = {a, flat ? 0.0 : b};
             if (kernel_name == "nibble") fit.nibble = a;
-            if (kernel_name == "table") fit.table = a;
             std::string shown = flat ? number(a).substr(0, 7) : number(a).substr(0, 7) + " + " + number(b).substr(0, 7) + "*" + axis;
             std::printf("  %-13s %-26s %6.1f\n", kernel, shown.c_str(),
                         rel_error(point, [&](double x) { return a + b * x; }));

@@ -52,7 +52,7 @@ memmem.
 | `cover.rs` | `ProbeCover::from_runs` | port |
 | `scan/mod.rs` | `BLOCK`, block driver, `Check`, `Facts` construction, `both_stages`, `Isa` | port |
 | `scan/policy/mod.rs` | matcher and resolver selection, fitted cost rows, `scan_ns` | port; u8 rows from old |
-| `scan/matcher/{eq_or,range,nibble_n8,table,shared}.rs` | u16 kernels on NEON, AVX2, AVX-512 | port the u8 counterparts from old |
+| `scan/matcher/{eq_or,range,nibble_n8,shared}.rs` | u16 kernels on NEON, AVX2, AVX-512 | port the u8 counterparts from old; `table.rs` is not ported (§6.3) |
 | `old: scan/novel/matcher/nibble.rs` | universal 16×16 bitmap for u8 codes | port; FSST keeps it |
 | `old: scan/novel/matcher/{eq_or,range,nibble_n_8}.rs` | the same kernels with `u8` impls | port the u8 impls |
 | `scan/resolver/{shared,linear_seek,gallop_seek}.rs` | cursor loop and the two seeks, generic over the offset width | port |
@@ -298,7 +298,11 @@ the whole of `nibble.rs`. Take the structure from new (matchers built from
 | `range` | K = 0, R ≥ 1 | `3R - 1` | `(codes - begin) <=u (last - begin)` per range, ORed |
 | `nibble_n8`, 1 batch | 1 ≤ K ≤ 8, any R | `7 + 3R` | bit `k` set in `low[t_k & 0xf]` and `high[t_k >> 4]`; `tbl(low, c & 0xf) & tbl(high, c >> 4) != 0` |
 | `nibble` | any K, any R | 8 | universal 16×16 bitmap; ranges are set into the tables and cost nothing |
-| `table` | anything | scalar | 64 KB byte table; the u16 fallback, not needed at u8 |
+
+The u16 `table` kernel is not ported: `nibble` takes every cover it would
+and runs five times faster (23.6 against 4.8 GB/s), so no shape would ever
+reach it. The tests keep a scalar definition of the mask as their oracle,
+as the Rust tests do.
 
 `nibble` build: for each covered code `c`, `row = c & 0x0f`, `bit = c >> 4`;
 `bit < 8 → low[row] |= 1 << bit`, else `high[row] |= 1 << (bit - 8)`.
@@ -344,10 +348,10 @@ every code.
 Plan = `(matcher, resolver, skip)`.
 
 - **matcher** = argmin `ns_per_code` over kernels that take the shape.
-  `takes`: table always; eq_or needs SIMD and K > 0; range needs SIMD,
-  K = 0, R > 0; nibble_n8 needs SIMD, K > 0, `ceil(K/8) ≤ MAX_BATCHES`
-  (3 on NEON and AVX-512, 2 on AVX2, 1 at u8 width); nibble (u8 only) takes
-  everything.
+  `takes`: eq_or needs K > 0; range needs K = 0, R > 0; nibble_n8 needs
+  K > 0 and `ceil(K/8) ≤ MAX_BATCHES` (3 on NEON and AVX-512, 2 on AVX2 at
+  u16, 1 at u8); nibble takes everything, which is the role the u16 `table`
+  had.
 - **skip** = `skip_ns(d) < 0`, `d = expected_hits / code_count`,
   `skip_ns(d) = (reduction - pack · exp(-128 · d)) / 128`, `(0.75, 1.01)`
   on NEON and AVX2, `(0.35, 0.0)` on AVX-512. Break-even near `d = 2.3e-3`.
@@ -562,7 +566,7 @@ unchanged (`--encoding fsst`). Data and output folders are gitignored.
    unreachable and marked off target.
 4. `prefilter_matcher_sweep`: sample-0 sets, ranges alone at R in {1..32} and
    widths {1, 16, 256} that fit 256 codes, width-16 ranges beside K in {1, 8,
-   16} at target 0.01; kernels `table`, `eq_or`, `range`, `nibble_n8k` at
+   16} at target 0.01; kernels `eq_or`, `range`, `nibble_n8k` at
    `ceil(K/8)` batches up to 32, `nibble`, each vector kernel with and without
    the skip flag; fastest of five passes over a 4M-code prefix; rows checked
    against the cover over the first sixteenth. Writes
@@ -581,7 +585,7 @@ branch's u8 rows in §6.5.
 the block to paste into the policy; `--refit [csv]` does the same from the
 newest CSV in `output/`, or the one named, without sweeping. The matcher
 fit mirrors onpair's: a relative-error weighted line per kernel over its own
-axis (K, batches, R; flat for `nibble` and `table`), the per-range slope
+axis (K, batches, R; flat for `nibble`), the per-range slope
 from the residual over the tokens-only line for `eq_or` and `nibble_n8k`,
 the rate ceiling, and the skip flag's cost at each selectivity. First fit on
 the M4 Pro, ns per code:
@@ -592,7 +596,6 @@ the M4 Pro, ns per code:
 | range | 0.0036 + 0.0117·R | 0.0032 + 0.0111·R |
 | nibble_n8k | 0.0268 + 0.0124·R | 0.0243 + 0.0115·R |
 | nibble | 0.0425 | 0.0386 |
-| table | 0.208 | 0.195 at u16 |
 
 Skip flag: saves 0.0006 (eq_or) to 0.003 (nibble_n8k) ns per code on a
 stream nothing hits, costs 0.008 to 0.026 from target 0.001 up, so the
@@ -630,4 +633,4 @@ draws it.
 | frequency index | one counting pass over the stream at analysis time, not timed |
 | location | new sources under `search/` in this repo, C++17, library target |
 | raw codes | still open: cover as runs over raw codes with the λ weight counting raw runs, or a sorted permutation kept for the planner so a `Range` stays one cut term |
-| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble,table}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`; tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt` |
+| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`; tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt` |

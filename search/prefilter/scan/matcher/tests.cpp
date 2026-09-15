@@ -12,7 +12,6 @@
 #include "nibble.hpp"
 #include "nibble_n8.hpp"
 #include "range.hpp"
-#include "table.hpp"
 
 using namespace fsst::search::prefilter;
 using namespace fsst::search::prefilter::scan;
@@ -44,7 +43,6 @@ static void agrees(const char* name, const ProbeCover& cover, const uint8_t* cod
 static void every_matcher(const ProbeCover& cover, const uint8_t* codes) {
     const size_t k = cover.points.size();
     const size_t r = cover.ranges.size();
-    agrees<Table>("table", cover, codes);
     agrees<Nibble<true>>("nibble skip", cover, codes);
     agrees<Nibble<false>>("nibble", cover, codes);
     if (k > 0) {
@@ -208,7 +206,6 @@ static void the_driver_scans_every_block() {
         for (ProbeCover cover : {ProbeCover{{7}, {}}, ProbeCover{{7, 9, 11}, {}},
                                  ProbeCover{{}, {{20, 25}}}, ProbeCover{{1}, {{20, 25}, {60, 63}}},
                                  ProbeCover{{200}, {}}}) {
-            driver_agrees<Table, resolver::LinearSeek<uint32_t>>("table linear", cover, codes, offsets);
             driver_agrees<Nibble<true>, resolver::GallopSeek<uint32_t>>("nibble gallop", cover, codes,
                                                                         offsets);
             driver_agrees<Nibble<false>, resolver::LinearSeek<uint32_t>>("nibble linear", cover, codes,
@@ -231,8 +228,8 @@ static void padding_makes_no_candidate() {
     std::vector<uint8_t> codes(10, 7);
     std::vector<uint32_t> offsets{0, 10};
     std::vector<size_t> got;
-    both_stages<Table, resolver::LinearSeek<uint32_t>>(ProbeCover{{0}, {}}, codes.data(), codes.size(),
-                                                       offsets.data(), offsets.size(), Superset{}, got);
+    both_stages<Nibble<true>, resolver::LinearSeek<uint32_t>>(ProbeCover{{0}, {}}, codes.data(), codes.size(),
+                                                              offsets.data(), offsets.size(), Superset{}, got);
     CHECK(got.empty());
     both_stages<Nibble<false>, resolver::LinearSeek<uint32_t>>(ProbeCover{{}, {{0, 3}}}, codes.data(),
                                                                codes.size(), offsets.data(),
