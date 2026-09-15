@@ -41,10 +41,10 @@ class Walk {
                     steps.push_back({ESCAPE, true, e.byte, from, to});
                     break;
                 case Probe::Range:
-                    for (uint8_t c : e.codes) {
-                        nodes_[from].terminal[c >> 6] |= uint64_t{1} << (c & 63);
-                        steps.push_back({c, false, 0, from, to});
-                    }
+                    nodes_[from].has_terminal = true;
+                    nodes_[from].terminal = e.range;
+                    for (size_t c = e.range.begin; c <= e.range.last; ++c)
+                        steps.push_back({static_cast<uint8_t>(c), false, 0, from, to});
                     break;
                 case Probe::Set:
                     for (uint8_t c : e.codes) steps.push_back({c, false, 0, from, to});
@@ -97,9 +97,10 @@ class Walk {
         uint8_t step = 0;     // Point: the code; Escape: the literal byte
         uint16_t next = 0;
         uint8_t entry_len = 0;  // > 0 where the set into this node was too big
-        std::array<uint64_t, 4> terminal{};
+        bool has_terminal = false;
+        CodeRange terminal{0, 0};
 
-        bool terminal_has(uint8_t c) const { return (terminal[c >> 6] >> (c & 63)) & 1; }
+        bool terminal_has(uint8_t c) const { return has_terminal && terminal.contains(c); }
     };
 
     struct Step {

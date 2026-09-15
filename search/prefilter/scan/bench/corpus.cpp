@@ -42,6 +42,7 @@ int main(int argc, char** argv) {
     for (size_t l : len) raw_bytes += l;
 
     fsst_encoder_t* encoder = fsst_create(n, len.data(), str.data(), 0);
+    fsst_sort_codes(encoder);
     std::vector<unsigned char> out(2 * raw_bytes + 8 * n + 8);
     std::vector<size_t> len_out(n);
     std::vector<unsigned char*> str_out(n);

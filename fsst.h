@@ -93,6 +93,14 @@ fsst_create(
    int zeroTerminated       /* IN: whether input strings are zero-terminated. If so, encoded strings are as well (i.e. symbol[0]=""). */
 );
 
+/* Write codes in the byte order of their symbols: a symbol's code becomes its rank in lexicographic order, a symbol
+ * before its extensions, code 255 stays the escape. Decoders from fsst_export()/fsst_import() come out in the same
+ * order, so symbol[c] is sorted by c and every prefix names a contiguous code range. Call once after fsst_create(). */
+void
+fsst_sort_codes(
+   fsst_encoder_t *encoder  /* IN: the symbol table to renumber. */
+);
+
 /* Create another encoder instance, necessary to do multi-threaded encoding using the same symbol table. */ 
 fsst_encoder_t*    
 fsst_duplicate(

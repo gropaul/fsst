@@ -2,6 +2,7 @@
 // every code of a row as the hit. The tokenizer here is the encoder's parse:
 // longest symbol that matches, else marker and literal.
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -19,11 +20,13 @@ struct Column {
     std::vector<uint32_t> offsets{0};
 };
 
-// `singles` get one-byte symbols; other bytes escape.
+// `singles` get one-byte symbols; other bytes escape. Codes in byte order,
+// as fsst_sort_codes writes them.
 static Dictionary dictionary(const std::string& singles, const std::vector<std::string>& extra) {
     std::vector<std::string> symbols;
     for (char c : singles) symbols.emplace_back(1, c);
     for (const std::string& s : extra) symbols.push_back(s);
+    std::sort(symbols.begin(), symbols.end());
     Dictionary d;
     CHECK(symbols.size() <= 255);
     d.count = symbols.size();
@@ -31,7 +34,16 @@ static Dictionary dictionary(const std::string& singles, const std::vector<std::
         d.len[c] = static_cast<uint8_t>(symbols[c].size());
         std::memcpy(d.bytes[c].data(), symbols[c].data(), symbols[c].size());
     }
+    CHECK(d.sorted());
     return d;
+}
+
+static uint8_t code_of(const Dictionary& d, const std::string& symbol) {
+    for (size_t c = 0; c < d.count; ++c)
+        if (d.length(c) == symbol.size() && std::memcmp(d.symbol(c), symbol.data(), symbol.size()) == 0)
+            return static_cast<uint8_t>(c);
+    CHECK_MSG(false, "no symbol %s", symbol.c_str());
+    return 0;
 }
 
 static void tokenize(const Dictionary& d, const std::string& row, std::vector<uint8_t>& codes) {
@@ -193,8 +205,7 @@ static void escapes_inside_and_around_the_occurrence() {
 // cannot see through; the walk must.
 static void a_literal_equal_to_a_covered_code() {
     Dictionary d = dictionary(LETTERS, {"goo", "gl"});
-    uint8_t goo = static_cast<uint8_t>(LETTERS.size());
-    std::string literal(1, static_cast<char>(goo));
+    std::string literal(1, static_cast<char>(code_of(d, "goo")));
     std::vector<std::string> rows = {literal + "gle", "x" + literal + "y", "google", literal + literal,
                                      "go" + literal + "gle", literal};
     walk_decides(LETTERS, {"goo", "gl"}, rows, "google");

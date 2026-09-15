@@ -33,6 +33,7 @@ static Column compress_rows(const std::vector<std::string>& rows) {
         raw_bytes += len[i];
     }
     fsst_encoder_t* encoder = fsst_create(n, len.data(), str.data(), 0);
+    fsst_sort_codes(encoder);
     std::vector<unsigned char> out(2 * raw_bytes + 8 * n + 8);
     std::vector<size_t> len_out(n);
     std::vector<unsigned char*> str_out(n);
@@ -58,6 +59,7 @@ static Column compress_rows(const std::vector<std::string>& rows) {
     fsst_decoder_t decoder;
     fsst_import(&decoder, header);
     col.dict = Dictionary::from(decoder.symbol, decoder.len, symbol_count(header));
+    CHECK(col.dict.sorted());
     fsst_destroy(encoder);
     col.freq = Frequency::of(col.codes.data(), col.codes.size());
 
@@ -131,12 +133,23 @@ static void check_graph(const Column& col, const std::string& pat, const std::ve
             ++g_escape_edges;
             CHECK(e.to == e.from + 1 && e.codes.size() == 1 && e.codes[0] == ESCAPE && e.byte == bytes(pat)[e.from]);
         }
-        ProbeCover shape = ProbeCover::from_runs([&] {
-            std::vector<CodeRange> runs;
-            for (uint8_t c : e.codes) runs.push_back({c, c});
-            return runs;
-        }());
-        CHECK(e.points == shape.points.size() && e.ranges == shape.ranges.size());
+        if (e.probe == Probe::Range) {
+            CHECK(e.codes.empty() && e.points == 0 && e.ranges == 1 && e.range.begin <= e.range.last);
+            // Exactly the symbols the suffix is a prefix of, contiguous because the codes are sorted.
+            size_t m = n - e.from;
+            for (size_t c = 0; c < col.dict.count; ++c) {
+                bool prefixed = col.dict.length(c) >= m && std::memcmp(col.dict.symbol(c), bytes(pat) + e.from, m) == 0;
+                CHECK_MSG(prefixed == e.range.contains(static_cast<uint8_t>(c)), "%s: range %u-%u at code %zu",
+                          pat.c_str(), e.range.begin, e.range.last, c);
+            }
+        } else {
+            ProbeCover shape = ProbeCover::from_runs([&] {
+                std::vector<CodeRange> runs;
+                for (uint8_t c : e.codes) runs.push_back({c, c});
+                return runs;
+            }());
+            CHECK(e.points == shape.points.size() && e.ranges == shape.ranges.size());
+        }
         if (e.cuttable()) probes.push_back(&e);
     }
     CHECK_MSG(!sink_reachable_avoiding(g, [](const Edge& e) { return e.cuttable(); }),
@@ -358,8 +371,8 @@ static void sweep_prices_at_or_below_the_frequency_cut() {
 
 // Synthetic graphs for the cut alone. Uncuttable steps are SetTooBig.
 static Edge synthetic(uint32_t from, uint32_t to, int64_t frequency) {
-    if (frequency < 0) return Edge{from, to, Probe::SetTooBig, 0, {}, 0, 0, 0};
-    return Edge{from, to, Probe::Point, 0, {0}, static_cast<uint32_t>(frequency), 1, 0};
+    if (frequency < 0) return Edge{from, to, Probe::SetTooBig, 0, {}, CodeRange{0, 0}, 0, 0, 0};
+    return Edge{from, to, Probe::Point, 0, {0}, CodeRange{0, 0}, static_cast<uint32_t>(frequency), 1, 0};
 }
 
 using Steps = std::vector<std::pair<uint32_t, uint32_t>>;

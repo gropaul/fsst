@@ -387,14 +387,17 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
    u8 stackBuf[512+8] = {};
    vector<u8> heapBuf;
 
-   // three variants are possible. dead code falls away since the bool arguments are constants
-   auto compressVariant = [&](bool noSuffixOpt, bool avoidBranch) {
+   // six variants are possible. dead code falls away since the bool arguments are constants
+   const u8 *perm = symbolTable.perm;
+   auto compressVariant = [&](bool noSuffixOpt, bool avoidBranch, bool sorted) {
+      // the written code: the symbol's rank in byte order when sorted; the escape pseudo code 255 maps to itself
+      auto emit = [&](size_t code) { return sorted ? perm[(u8) code] : (u8) code; };
       while (cur < end) {
          u64 word = fsst_unaligned_load(cur);
          size_t code = symbolTable.shortCodes[word & 0xFFFF];
          if (noSuffixOpt && ((u8) code) < suffixLim) {
             // 2 byte code without having to worry about longer matches
-            *out++ = (u8) code; cur += 2;
+            *out++ = emit(code); cur += 2;
          } else {
             size_t pos = word & 0xFFFFFF;
             size_t idx = FSST_HASH(pos)&(symbolTable.hashTabSize-1);
@@ -402,19 +405,19 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
             out[1] = (u8) word; // speculatively write out escaped byte
             word &= (0xFFFFFFFFFFFFFFFF >> (u8) s.icl);
             if ((s.icl < FSST_ICL_FREE) && s.load_num() == word) {
-               *out++ = (u8) s.code(); cur += s.length();
+               *out++ = emit(s.code()); cur += s.length();
             } else if (avoidBranch) {
                // could be a 2-byte or 1-byte code, or miss
                // handle everything with predication 
-               *out = (u8) code; 
+               *out = emit(code); 
                out += 1+((code&FSST_CODE_BASE)>>8);
                cur += (code>>FSST_LEN_BITS); 
             } else if ((u8) code < byteLim) {
                // 2 byte code after checking there is no longer pattern
-               *out++ = (u8) code; cur += 2;
+               *out++ = emit(code); cur += 2;
             } else {
                // 1 byte code or miss. 
-               *out = (u8) code; 
+               *out = emit(code); 
                out += 1+((code&FSST_CODE_BASE)>>8); // predicated - tested with a branch, that was always worse
                cur++;
             }
@@ -439,12 +442,20 @@ static inline size_t compressBulk(SymbolTable &symbolTable, size_t nlines, const
       end = cur + len;
 
       // based on symboltable stats, choose a variant that is nice to the branch predictor
-      if (noSuffixOpt) {
-         compressVariant(true,false);
+      if (symbolTable.sorted) {
+         if (noSuffixOpt) {
+            compressVariant(true,false,true);
+         } else if (avoidBranch) {
+            compressVariant(false,true,true);
+         } else {
+            compressVariant(false,false,true);
+         }
+      } else if (noSuffixOpt) {
+         compressVariant(true,false,false);
       } else if (avoidBranch) {
-         compressVariant(false,true);
+         compressVariant(false,true,false);
       } else {
-         compressVariant(false, false);
+         compressVariant(false,false,false);
       }
       lenOut[curLine] = (size_t) (out - strOut[curLine]);
    } 
@@ -505,6 +516,10 @@ extern "C" fsst_encoder_t* fsst_create(size_t n, const size_t lenIn[], const u8 
    return (fsst_encoder_t*) encoder;
 }
 
+extern "C" void fsst_sort_codes(fsst_encoder_t *encoder) {
+   ((Encoder*) encoder)->symbolTable->sortCodes();
+}
+
 /* create another encoder instance, necessary to do multi-threaded encoding using the same symbol table */
 extern "C" fsst_encoder_t* fsst_duplicate(fsst_encoder_t *encoder) {
    Encoder *e = new Encoder();
@@ -539,7 +554,7 @@ extern "C" u32 fsst_export(fsst_encoder_t *encoder, u8 *buf) {
 
    /* do not assume unaligned reads here */
    memcpy(buf, &version, 8);
-   buf[8] = e->symbolTable->zeroTerminated;
+   buf[8] = e->symbolTable->zeroTerminated | (e->symbolTable->sorted << 1); // bit 1: codes are in byte order of their symbols
    for(u32 i=0; i<8; i++)
       buf[9+i] = (u8) e->symbolTable->lenHisto[i];
    u32 pos = 17;
@@ -585,6 +600,22 @@ extern "C" u32 fsst_import(fsst_decoder_t *decoder, u8 const *buf) {
       }
    }
    if (decoder->zeroTerminated) lenHisto[0]++; 
+
+   // sorted codes: the encoder wrote each symbol's rank in byte order, so sort the symbols into that order here
+   if (buf[8] & 2) {
+      u32 n = code;
+      u8 order[256];
+      for (u32 i=0; i<n; i++) order[i] = (u8) i;
+      std::sort(order, order+n, [decoder](u8 a, u8 b) {
+         const u8 *x = (const u8*) &decoder->symbol[a], *y = (const u8*) &decoder->symbol[b];
+         u32 la = decoder->len[a], lb = decoder->len[b], m = la < lb ? la : lb;
+         int c = memcmp(x, y, m);
+         return c != 0 ? c < 0 : la < lb;
+      });
+      u64 symbol[256]; u8 len[256];
+      for (u32 r=0; r<n; r++) { symbol[r] = decoder->symbol[order[r]]; len[r] = decoder->len[order[r]]; }
+      for (u32 r=0; r<n; r++) { decoder->symbol[r] = symbol[r]; decoder->len[r] = len[r]; }
+   }
 
    // fill unused symbols with text "corrupt". Gives a chance to detect corrupted code sequences (if there are unused symbols).
    while(code<255) {

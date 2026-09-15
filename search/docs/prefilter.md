@@ -61,7 +61,7 @@ memmem.
 | `scan/README.md`, `old: scan/novel/README.md` | rates, model derivation, instruction counts | reference; the old one has the u8 tables |
 | `tests.rs`, `scan/matcher/tests.rs`, `scan/resolver/tests.rs` | oracles | port the strategies (§10) |
 | `scan/bench/` | sweeps and fits | skip |
-| `old: src/fsst/encode.rs`, `old: src/fsst/tests.rs` | FSST symbol table sorted into a dictionary, stream remapped | replace (§3) |
+| `old: src/fsst/encode.rs`, `old: src/fsst/tests.rs` | FSST symbol table sorted into a dictionary, stream remapped | replaced by `fsst_sort_codes` in the compressor (§3) |
 
 Gone from new and not wanted in the port: the fused kernels (`old:
 scan/{byte,aarch64,x86,generic}`, `sink.rs`), `naive`, `Pattern` and
@@ -73,10 +73,10 @@ scan/{byte,aarch64,x86,generic}`, `sink.rs`), `naive`, `Pattern` and
 | --- | --- | --- |
 | token bytes and length by id | sorted `CompactDictionary` | `fsst_decoder_t::symbol[c]` (u64 little-endian), `len[c]`, `c < nSymbols` |
 | `MAX_TOKEN_SIZE` | 16 | 8; the u128 `NeedlePrefix` in `walk.rs` becomes a u64 against the symbol word |
-| tokens a byte string is a prefix of (`prefix_range`) | binary search, contiguous id range | linear scan over ≤255 symbols; result is a *set* of codes |
+| tokens a byte string is a prefix of (`prefix_range`) | binary search, contiguous id range | linear scan over ≤255 symbols; contiguous `CodeRange` because the codes are sorted (`Dictionary::prefix_range`) |
 | longest token that is a prefix of `needle[o..]` (`greedy_in_needle`) | narrowing binary search | linear scan, at most 255 × 8 compares |
 | tokens ending with `needle[..k]`, tokens containing the needle (`alignment_candidates`) | one memmem sweep over the payload | linear scan; the 512 and 16 caps of §4 still apply |
-| term frequency per token | cumulative `u32[num_tokens+1]` | `count[256]` over the stream, one pass; a range's frequency is the sum over its set |
+| term frequency per token | cumulative `u32[num_tokens+1]` | `count[256]` plus `cum[257]` over the stream, one pass; a range's frequency is one subtraction |
 | code width | u16 (new), u8 or u16 (old) | u8 |
 
 **Codes.** A compressed FSST string is bytes 0..254 naming symbols, and 255
@@ -86,15 +86,19 @@ from byte 1 of the serialized header, or from summing `lenHisto` at header
 bytes 9..16, or by recognising the corrupt fill. With `zeroTerminated`, code
 0 is the one-byte symbol `\0`.
 
-**No sorted id space.** onpair sorts the symbols and rewrites the code
-stream to sorted ids (`old: transcode_fsst_to_onpair`), so a prefix search
-yields a contiguous id range. The C++ port scans the stream FSST wrote, so
-raw codes stay and a `Range` probe of the graph is a set of raw codes.
-`from_runs` still merges abutting raw codes into ranges. At u8 width the
-`nibble` bitmap matches any subset of 256 codes at a flat rate, so
-fragmentation costs nothing once the cover has three or more terms (§6.3).
-The λ weight `points + 2·ranges` then counts raw runs; §11 leaves the
-alternative open.
+**Sorted id space, written by the compressor.** onpair sorts the symbols
+and rewrites the code stream to sorted ids (`old: transcode_fsst_to_onpair`),
+so a prefix search yields a contiguous id range. This branch gets the same
+from the compressor: `fsst_sort_codes(encoder)` (call once after
+`fsst_create`) fills a 256-entry permutation `perm[code]` = the symbol's rank
+in byte order, a symbol before its extensions, 255 staying the escape.
+`compressBulk` applies it at its write sites and nowhere else, so FSST's
+internal numbering by length and the `suffixLim`/`byteLim` fast paths are
+untouched. `fsst_export` sets bit 1 of header byte 8 and writes the symbols
+in the internal order; `fsst_import` sorts them into rank order when the bit
+is set, so `fsst_decoder_t::symbol[c]` is sorted by `c` and no separate
+table travels with the data. The planner asserts `Dictionary::sorted()`; a
+`Range` edge is one `CodeRange` and one λ term.
 
 **Stream and rows.** `fsst_compress` writes strings back to back into
 `output` with `strOut[i]` pointing at each; `row_offsets[i] = strOut[i] -
@@ -506,7 +510,7 @@ against the new structure:
 | --- | --- | --- |
 | `graph.rs` `build_state` | panics on a dead end | add edge `o -> o + 1` with probe `Point(255)` and the escaped byte `needle[o]` attached, so the chain continues and the cut may fall later; frequency of 255 is the escape count in the stream |
 | `graph.rs` `build_alignment_graph` | `debug_assert frequencies.num_tokens() == dict.num_tokens()` | frequency array is `count[256]`; dictionary has ≤ 255 symbols |
-| `graph.rs` `greedy_in_needle`, `terminal_range`, `alignment_candidates` | sorted-dictionary binary searches, memmem sweep | linear scans over ≤ 255 symbols; a "range" is a code set; `from_runs` merges what happens to abut |
+| `graph.rs` `greedy_in_needle`, `terminal_range`, `alignment_candidates` | sorted-dictionary binary searches, memmem sweep | linear scans over ≤ 255 symbols; the terminal range is a contiguous `CodeRange` because `fsst_sort_codes` sorted the codes (§3) |
 | `walk.rs` `from_graph` | `Point` edges only between interior nodes | an escape edge becomes `greedy_step = Escape(byte, to)` on `nodes[o]` and `edges[255] += (o, o + 1)`; several escape edges share token 255 and the byte disambiguates |
 | `walk.rs` `forward` | one code per step | on `Escape(byte, next)`: need `codes[i] == 255 && i + 1 < row_end && codes[i + 1] == byte`, then `i += 2`; a 255 met on a unit boundary is always a marker; landing on the sink is success, since the escape edge into it has no terminal set standing in for it |
 | `walk.rs` `backward` | unit ending at `end - 1` is a token | if the run of 255s ending at `end - 2` is odd, the unit is the literal `codes[end - 1]` and only the escape edge into `node` with that byte can match; then `end -= 2` |
@@ -515,7 +519,7 @@ against the new structure:
 | `mod.rs` `MAX_PATTERN_LEN` | 65535 | keep |
 | `scan/matcher/*` | u16 lanes | u8 lanes from old, plus `nibble` from old |
 | `scan/policy/mod.rs` | u16 cost rows, no `nibble` | u8 rows from old (§6.5), `nibble` in the kernel list with cost 0.0386 and `takes` always |
-| `old: src/fsst/encode.rs` | sort symbols, remap stream, pass escapes through | drop; read `fsst_decoder_t` directly |
+| `old: src/fsst/encode.rs` | sort symbols, remap stream, pass escapes through | the compressor writes sorted codes itself (`fsst_sort_codes`, §3); read `fsst_decoder_t` directly |
 | nowhere | 511-byte chunk boundaries | removed from the compressor instead (§3) |
 
 Frequencies for the literal bytes: the counting pass sees literals as codes
@@ -654,5 +658,5 @@ draws it.
 | order of work | stage one kernels, resolvers and the alignment graph first; the walk after; sequence probes later |
 | frequency index | one counting pass over the stream at analysis time, not timed |
 | location | new sources under `search/` in this repo, C++17, library target |
-| raw codes | cover over raw codes, no permutation: a `Range` or `Set` edge holds its raw code set, `from_edge_cut` merges the runs, and the λ weight of an edge counts the runs its own codes merge to (`points + 2·ranges` of that edge alone) |
+| raw codes | sorted codes, written by the compressor: `fsst_sort_codes` permutes the codes at the write sites into byte order of their symbols (§3); a `Range` edge is one `CodeRange` weighing `(0, 1)`, a `Set` edge's weight counts the runs its codes merge to |
 | C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, exact `candidate_rows`, `superset_rows`, `MAX_PATTERN_LEN`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |

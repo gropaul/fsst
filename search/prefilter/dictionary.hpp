@@ -6,6 +6,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
+#include <cstring>
+
+#include "cover.hpp"
 
 namespace fsst::search::prefilter {
 
@@ -31,6 +35,31 @@ struct Dictionary {
 
     const uint8_t* symbol(size_t code) const { return bytes[code].data(); }
     size_t length(size_t code) const { return len[code]; }
+
+    // Whether the codes are in byte order of their symbols, a symbol before
+    // its extensions: what fsst_sort_codes gives and the planner relies on.
+    bool sorted() const {
+        for (size_t c = 1; c < count; ++c) {
+            size_t m = std::min(length(c - 1), length(c));
+            int cmp = std::memcmp(symbol(c - 1), symbol(c), m);
+            if (cmp > 0 || (cmp == 0 && length(c - 1) >= length(c))) return false;
+        }
+        return true;
+    }
+
+    // The symbols prefix[0..m) is a prefix of, the exact one included:
+    // contiguous in a sorted table.
+    bool prefix_range(const uint8_t* prefix, size_t m, CodeRange& out) const {
+        size_t first = count, last = 0;
+        for (size_t c = 0; c < count; ++c)
+            if (length(c) >= m && std::memcmp(symbol(c), prefix, m) == 0) {
+                if (first == count) first = c;
+                last = c;
+            }
+        if (first == count) return false;
+        out = CodeRange{static_cast<uint8_t>(first), static_cast<uint8_t>(last)};
+        return true;
+    }
 };
 
 inline size_t symbol_count(const uint8_t* export_header) { return export_header[1]; }

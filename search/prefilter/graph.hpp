@@ -22,10 +22,10 @@ constexpr size_t PROBE_SET_SIZE_LIMIT_K1 = 16;
 
 // Point: the greedy symbol at an interior offset. Escape: the marker 255
 // with the literal needle byte behind it. Range: the symbols a needle suffix
-// is a prefix of, into the sink. Set: an alignment's first symbols out of
-// the source, or the symbols holding the whole needle past their start.
-// SetTooBig: an alignment whose set was not enumerated; a cut may not
-// select it.
+// is a prefix of, into the sink, one code range since the codes are in byte
+// order. Set: an alignment's first symbols out of the source, or the
+// symbols holding the whole needle past their start. SetTooBig: an
+// alignment whose set was not enumerated; a cut may not select it.
 enum class Probe : uint8_t { Point, Escape, Range, Set, SetTooBig };
 
 struct Edge {
@@ -33,9 +33,10 @@ struct Edge {
     uint32_t to;
     Probe probe;
     uint8_t byte;                // Escape only: the literal after the marker
-    std::vector<uint8_t> codes;  // ascending; Point and Escape hold one
+    std::vector<uint8_t> codes;  // Point, Escape, Set: ascending, one for Point and Escape
+    CodeRange range;             // Range only
     uint32_t frequency;          // codes the probe matches in the stream
-    uint32_t points;             // runs the codes merge to: the lambda weight's terms
+    uint32_t points;             // the lambda weight's terms: runs the codes merge to, or one range
     uint32_t ranges;
 
     bool cuttable() const { return probe != Probe::SetTooBig; }
@@ -55,6 +56,7 @@ inline ProbeCover from_edge_cut(const std::vector<const Edge*>& cut) {
     std::vector<CodeRange> runs;
     for (const Edge* e : cut) {
         assert(e->cuttable());
+        if (e->probe == Probe::Range) runs.push_back(e->range);
         for (uint8_t c : e->codes) runs.push_back({c, c});
     }
     return ProbeCover::from_runs(std::move(runs));
@@ -112,21 +114,20 @@ struct Builder {
         std::vector<CodeRange> runs;
         for (uint8_t c : codes) runs.push_back({c, c});
         ProbeCover shape = ProbeCover::from_runs(runs);
-        Edge e{from, to, probe, byte, std::move(codes), 0, static_cast<uint32_t>(shape.points.size()),
-               static_cast<uint32_t>(shape.ranges.size())};
+        Edge e{from, to, probe, byte, std::move(codes), CodeRange{0, 0}, 0,
+               static_cast<uint32_t>(shape.points.size()), static_cast<uint32_t>(shape.ranges.size())};
         e.frequency = freq.of_codes(e.codes);
         edges.push_back(std::move(e));
     }
 
+    void add_range(uint32_t from, uint32_t to, CodeRange range) {
+        edges.push_back(Edge{from, to, Probe::Range, 0, {}, range, freq.of_range(range), 0, 1});
+    }
+
     // The symbols needle[o..] is a prefix of, the exact one included.
-    std::vector<uint8_t> terminal_set(size_t o) const {
-        std::vector<uint8_t> set;
+    bool terminal_range(size_t o, CodeRange& out) const {
         size_t m = n - o;
-        if (m > MAX_TOKEN_SIZE) return set;
-        for (size_t code = 0; code < dict.count; ++code)
-            if (dict.length(code) >= m && std::memcmp(dict.symbol(code), needle + o, m) == 0)
-                set.push_back(static_cast<uint8_t>(code));
-        return set;
+        return m <= MAX_TOKEN_SIZE && dict.prefix_range(needle + o, m, out);
     }
 
     // The encoder's longest match restricted to the needle: the longest
@@ -150,8 +151,9 @@ struct Builder {
     // matching means the encoder escapes needle[o] and continues at o + 1.
     size_t build_state(size_t o) {
         uint32_t state = static_cast<uint32_t>(o);
-        std::vector<uint8_t> terminal = terminal_set(o);
-        if (!terminal.empty()) add(state, sink(), Probe::Range, terminal);
+        CodeRange terminal{0, 0};
+        bool has_terminal = terminal_range(o, terminal);
+        if (has_terminal) add_range(state, sink(), terminal);
         uint8_t code;
         size_t len;
         if (greedy(o, code, len)) {
@@ -159,7 +161,7 @@ struct Builder {
             if (next < n)
                 add(state, static_cast<uint32_t>(next), Probe::Point, {code});
             else
-                assert(std::find(terminal.begin(), terminal.end(), code) != terminal.end());
+                assert(has_terminal && terminal.contains(code));
             return next;
         }
         add(state, static_cast<uint32_t>(o + 1), Probe::Escape, {ESCAPE}, needle[o]);
@@ -184,6 +186,7 @@ struct Builder {
 inline AlignmentGraph build_alignment_graph(const Dictionary& dict, const uint8_t* needle, size_t n,
                                             const Frequency& freq) {
     assert(n > 0);
+    assert(dict.sorted());
     detail::Builder b{dict, needle, n, freq, {}, std::vector<bool>(n, false)};
     Candidates cand = alignment_candidates(dict, needle, n);
     size_t kmax = std::min(n, MAX_TOKEN_SIZE);

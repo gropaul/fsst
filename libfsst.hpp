@@ -122,6 +122,17 @@ struct Symbol {
    size_t hash() const { size_t v = 0xFFFFFF & load_num(); return FSST_HASH(v); } // hash on the next 3 bytes
 };
 
+// byte order of symbols, a symbol before its extensions
+inline bool symbolLess(const Symbol& a, const Symbol& b) {
+   u64 x = a.load_num(), y = b.load_num();
+   u32 la = a.length(), lb = b.length(), n = la < lb ? la : lb;
+   for (u32 j=0; j<n; j++) {
+      u8 p = (u8) (x >> (8*j)), q = (u8) (y >> (8*j));
+      if (p != q) return p < q;
+   }
+   return la < lb;
+}
+
 // Symbol that can be put in a queue, ordered on gain
 struct QSymbol{
    Symbol symbol;
@@ -183,11 +194,14 @@ struct SymbolTable {
    u16 terminator;        // code of 1-byte symbol, that can be used as a terminator during compression
    bool zeroTerminated;   // whether we are expecting zero-terminated strings (we then also produce zero-terminated compressed strings)
    u16 lenHisto[FSST_CODE_BITS]; // lenHisto[x] is the amount of symbols of byte-length (x+1) in this SymbolTable
+   bool sorted;           // whether written codes go through perm[]
+   u8 perm[256];          // perm[code] is the code written out: the symbol's rank in byte order when sorted, else code
 
-   SymbolTable() : nSymbols(0), suffixLim(FSST_CODE_MAX), terminator(0), zeroTerminated(false) {
+   SymbolTable() : nSymbols(0), suffixLim(FSST_CODE_MAX), terminator(0), zeroTerminated(false), sorted(false) {
       // stuff done once at startup
       for (u32 i=0; i<256; i++) {
          symbols[i] = Symbol(i,i|(1<<FSST_LEN_BITS)); // pseudo symbols
+         perm[i] = i;
       }
       Symbol unused = Symbol((u8) 0,FSST_CODE_MASK); // single-char symbol, exception code
       for (u32 i=256; i<FSST_CODE_MAX; i++) {
@@ -342,6 +356,18 @@ struct SymbolTable {
        for(u32 i=0; i<hashTabSize; i++)
           if (hashTab[i].icl < FSST_ICL_FREE)
              hashTab[i] = symbols[newCode[(u8) hashTab[i].code()]];
+   }
+
+   // Written codes become the symbols' ranks in byte order; the internal numbering by length stays, so the
+   // compression fast paths do. Code 255 remains the escape. In zeroTerminated mode symbol 0 sorts first anyway,
+   // as no multi-byte symbol contains the terminator.
+   void sortCodes() {
+      u8 order[256];
+      for (u32 i=0; i<nSymbols; i++) order[i] = (u8) i;
+      std::sort(order, order+nSymbols, [this](u8 a, u8 b) { return symbolLess(symbols[a], symbols[b]); });
+      for (u32 r=0; r<nSymbols; r++) perm[order[r]] = (u8) r;
+      assert(!zeroTerminated || perm[0] == 0);
+      sorted = true;
    }
 };
 
