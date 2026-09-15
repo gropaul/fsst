@@ -220,6 +220,29 @@ static void driver_agrees(const char* name, const ProbeCover& cover, const std::
               codes.size());
 }
 
+// A pair whose first code is the last of a whole block and whose second
+// opens the next block: the driver must keep that bit, and drop only the
+// stream's last position when it pairs with padding.
+static void a_pair_across_the_block_seam() {
+    for (size_t len : {2 * BLOCK, 2 * BLOCK + 1, 3 * BLOCK + 5}) {
+        std::vector<uint8_t> codes(len, 0);
+        codes[BLOCK - 1] = 3;
+        codes[BLOCK] = 5;
+        codes[len - 1] = 3;  // pairs with the padding zero: no pair hit
+        std::vector<uint32_t> offsets{0, static_cast<uint32_t>(BLOCK - 1), static_cast<uint32_t>(BLOCK + 1),
+                                      static_cast<uint32_t>(len - 1), static_cast<uint32_t>(len)};
+        ProbeCover pair{{}, {}, {{3, 5}}};
+        driver_agrees<EqOr<false>, resolver::LinearSeek<uint32_t>>("pair at the seam", pair, codes, offsets);
+        ProbeCover zero_second{{}, {}, {{3, 0}}};
+        driver_agrees<EqOr<false>, resolver::LinearSeek<uint32_t>>("pair with the padding", zero_second, codes,
+                                                                   offsets);
+        std::vector<size_t> got;
+        both_stages<EqOr<false>, resolver::LinearSeek<uint32_t>>(pair, codes.data(), len, offsets.data(),
+                                                                 offsets.size(), Superset{}, got);
+        CHECK(got == std::vector<size_t>{1});
+    }
+}
+
 static void the_driver_scans_every_block() {
     Rng rng{7};
     for (size_t len : {size_t{0}, size_t{1}, size_t{10}, size_t{63}, size_t{64}, BLOCK - 1, BLOCK,
@@ -282,6 +305,7 @@ int main() {
     ranges_of_codes();
     pairs_of_codes();
     random_covers();
+    a_pair_across_the_block_seam();
     the_driver_scans_every_block();
     padding_makes_no_candidate();
     return finish("prefilter matcher tests");

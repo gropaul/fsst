@@ -58,7 +58,7 @@ void both_stages(const ProbeCover& cover, const uint8_t* codes, size_t len,
         if (matcher.check(block, bits)) {
             clear_from(bits, valid);
             // The stream's last code pairs with padding; only a covered code counts there.
-            if (pairs && valid > 0 && valid <= BLOCK) {
+            if (pairs && valid > 0 && at + valid == len) {
                 size_t last = valid - 1;
                 uint64_t bit = uint64_t{1} << (last % 64);
                 if (cover.contains(block[last]))
