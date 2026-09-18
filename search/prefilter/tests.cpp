@@ -139,11 +139,10 @@ static void check_cut_graph(const Column& col, const std::string& pat, const std
                   "%s: cut edge %u -> %u", pat.c_str(), e.from, e.to);
         if (e.probe == Probe::Pair) {
             CHECK(e.codes.empty() && e.points == 0 && e.ranges == 0 && e.pairs == 1);
-            size_t matched = 0;
-            for (size_t i = 0; i + 1 < col.codes.size(); ++i)
-                matched += col.codes[i] == e.pair.first && col.codes[i + 1] == e.pair.second;
-            CHECK_MSG(e.frequency == matched, "%s: pair %u %u reports %u, stands %zu times", pat.c_str(), e.pair.first,
-                      e.pair.second, e.frequency, matched);
+            // a pair's weight is the independence estimate, not a count: the counting index holds
+            // single codes only, so how often two codes follow one another is not recorded
+            CHECK_MSG(e.frequency == col.freq.pair_estimate(e.pair), "%s: pair %u %u reports %u, estimates %u",
+                      pat.c_str(), e.pair.first, e.pair.second, e.frequency, col.freq.pair_estimate(e.pair));
         }
         if (e.cuttable()) probes.push_back(&e);
     }

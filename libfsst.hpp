@@ -196,8 +196,10 @@ struct SymbolTable {
    u16 lenHisto[FSST_CODE_BITS]; // lenHisto[x] is the amount of symbols of byte-length (x+1) in this SymbolTable
    bool sorted;           // whether written codes go through perm[]
    u8 perm[256];          // perm[code] is the code written out: the symbol's rank in byte order when sorted, else code
+   bool hasCount;         // whether count[] was filled by fsst_set_frequency()
+   u32 count[256];        // occurrences of each byte in the compressed stream this table encoded
 
-   SymbolTable() : nSymbols(0), suffixLim(FSST_CODE_MAX), terminator(0), zeroTerminated(false), sorted(false) {
+   SymbolTable() : nSymbols(0), suffixLim(FSST_CODE_MAX), terminator(0), zeroTerminated(false), sorted(false), hasCount(false), count{} {
       // stuff done once at startup
       for (u32 i=0; i<256; i++) {
          symbols[i] = Symbol(i,i|(1<<FSST_LEN_BITS)); // pseudo symbols

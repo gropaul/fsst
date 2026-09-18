@@ -82,6 +82,9 @@ typedef struct {
    unsigned char zeroTerminated;   /* terminator is a single-byte code that does not appear in longer symbols */
    unsigned char len[255];         /* len[x] is the byte-length of the symbol x (1 < len[x] <= 8). */
    unsigned long long symbol[255]; /* symbol[x] contains in LITTLE_ENDIAN the bytesequence that code x represents (0 <= x < 255). */ 
+   unsigned int count[256];        /* count[x] is how often byte x stands in the compressed stream this table encoded;
+                                      all zero unless the table was exported with fsst_set_frequency(). Entry 255 counts
+                                      escape markers, and a literal byte behind an escape counts as the code it looks like. */
 } fsst_decoder_t;
 
 /* Calibrate a FSST symboltable from a batch of strings (it is best to provide at least 16KB of data). */
@@ -101,13 +104,22 @@ fsst_sort_codes(
    fsst_encoder_t *encoder  /* IN: the symbol table to renumber. */
 );
 
+/* Attach the code frequencies of the stream this symbol table encoded, so fsst_export() serializes them and
+ * fsst_import() hands them back in fsst_decoder_t::count. Counts are advisory: they describe how often each byte
+ * stands in the compressed output, for a reader that plans over the codes without decompressing. */
+void
+fsst_set_frequency(
+   fsst_encoder_t *encoder,       /* IN: the symbol table to annotate. */
+   const unsigned int count[256]  /* IN: occurrences of each byte in the compressed stream. */
+);
+
 /* Create another encoder instance, necessary to do multi-threaded encoding using the same symbol table. */ 
 fsst_encoder_t*    
 fsst_duplicate(
    fsst_encoder_t *encoder  /* IN: the symbol table to duplicate. */ 
 );
 
-#define FSST_MAXHEADER (8+1+8+2048+1) /* maxlen of deserialized fsst header, produced/consumed by fsst_export() resp. fsst_import() */
+#define FSST_MAXHEADER (8+1+8+255+2048+1024+1) /* maxlen of deserialized fsst header, produced/consumed by fsst_export() resp. fsst_import() */
 
 /* Space-efficient symbol table serialization (smaller than sizeof(fsst_decoder_t) - by saving on the unused bytes in symbols of len < 8). */
 unsigned int                /* OUT: number of bytes written in buf, at most sizeof(fsst_decoder_t) */
@@ -161,7 +173,7 @@ fsst_decompress(
    unsigned long long*__restrict__ symbol = (unsigned long long* __restrict__) decoder->symbol; 
    size_t code, posOut = 0, posIn = 0;
 #ifndef FSST_MUST_ALIGN /* defining on platforms that require aligned memory access may help their performance */
-#define FSST_UNALIGNED_STORE(dst,src) memcpy((unsigned long long*) (dst), &(src), sizeof(unsigned long long))
+#define FSST_UNALIGNED_STORE(dst,src) memcpy((void*) (dst), &(src), sizeof(unsigned long long))
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
    while (posOut+32 <= size && posIn+4 <= lenIn) {
       unsigned int nextBlock, escapeMask;

@@ -520,6 +520,12 @@ extern "C" void fsst_sort_codes(fsst_encoder_t *encoder) {
    ((Encoder*) encoder)->symbolTable->sortCodes();
 }
 
+extern "C" void fsst_set_frequency(fsst_encoder_t *encoder, const u32 count[256]) {
+   SymbolTable *st = ((Encoder*) encoder)->symbolTable.get();
+   memcpy(st->count, count, sizeof(st->count));
+   st->hasCount = true;
+}
+
 /* create another encoder instance, necessary to do multi-threaded encoding using the same symbol table */
 extern "C" fsst_encoder_t* fsst_duplicate(fsst_encoder_t *encoder) {
    Encoder *e = new Encoder();
@@ -554,15 +560,40 @@ extern "C" u32 fsst_export(fsst_encoder_t *encoder, u8 *buf) {
 
    /* do not assume unaligned reads here */
    memcpy(buf, &version, 8);
-   buf[8] = e->symbolTable->zeroTerminated | (e->symbolTable->sorted << 1); // bit 1: codes are in byte order of their symbols
+   // bit 1: codes are in byte order of their symbols. bit 2: a 256-entry u32 count array follows the symbols
+   buf[8] = e->symbolTable->zeroTerminated | (e->symbolTable->sorted << 1) | (e->symbolTable->hasCount << 2);
    for(u32 i=0; i<8; i++)
       buf[9+i] = (u8) e->symbolTable->lenHisto[i];
    u32 pos = 17;
 
-   // emit only the used bytes of the symbols 
-   for(u32 i = e->symbolTable->zeroTerminated; i < e->symbolTable->nSymbols; i++)
-      for(u32 j = 0; j < e->symbolTable->symbols[i].length(); j++)
-         buf[pos++] = e->symbolTable->symbols[i].val.str[j]; // serialize used symbol bytes
+   if (e->symbolTable->sorted) {
+      // codes are the symbols' ranks in byte order, so the table is serialized in that same order: a length
+      // per symbol, then its bytes. The length histogram cannot express this order, and reconstructing it by
+      // sorting on import costs more than the lengths do.
+      u8 rank[256];
+      for(u32 i = 0; i < e->symbolTable->nSymbols; i++)
+         rank[e->symbolTable->perm[i]] = (u8) i;
+      for(u32 r = e->symbolTable->zeroTerminated; r < e->symbolTable->nSymbols; r++)
+         buf[pos++] = (u8) e->symbolTable->symbols[rank[r]].length();
+      for(u32 r = e->symbolTable->zeroTerminated; r < e->symbolTable->nSymbols; r++) {
+         const Symbol& s = e->symbolTable->symbols[rank[r]];
+         for(u32 j = 0; j < s.length(); j++)
+            buf[pos++] = s.val.str[j];
+      }
+   } else {
+      // emit only the used bytes of the symbols, in the length groups the histogram describes
+      for(u32 i = e->symbolTable->zeroTerminated; i < e->symbolTable->nSymbols; i++)
+         for(u32 j = 0; j < e->symbolTable->symbols[i].length(); j++)
+            buf[pos++] = e->symbolTable->symbols[i].val.str[j]; // serialize used symbol bytes
+   }
+
+   // the code frequencies, little-endian, indexed by written code (so by sorted code where sortCodes() ran)
+   if (e->symbolTable->hasCount) {
+      for(u32 i = 0; i < 256; i++) {
+         u32 value = e->symbolTable->count[i];
+         for(u32 j = 0; j < 4; j++) buf[pos++] = (u8) (value >> (8*j));
+      }
+   }
 
    return pos; // length of what was serialized
 }
@@ -588,33 +619,41 @@ extern "C" u32 fsst_import(fsst_decoder_t *decoder, u8 const *buf) {
 
    // we use lenHisto[0] as 1-byte symbol run length (at the end)
    code = decoder->zeroTerminated;
-   if (decoder->zeroTerminated) lenHisto[0]--; // if zeroTerminated, then symbol "" aka 1-byte code=0, is not stored at the end
 
-   // now get all symbols from the buffer
-   for(u32 l=1; l<=8; l++) { /* l = 1,2,3,4,5,6,7,8 */
-      for(u32 i=0; i < lenHisto[(l&7) /* 1,2,3,4,5,6,7,0 */]; i++, code++)  {
-         decoder->len[code] = (l&7)+1; /* len = 2,3,4,5,6,7,8,1  */
+   if (buf[8] & 2) {
+      // sorted table: symbols stand in code order, each preceded by its length
+      u32 nSymbols = (u32) ((version >> 8) & 255);
+      const u8 *lengths = buf + pos;
+      pos += nSymbols - decoder->zeroTerminated;
+      for(; code < nSymbols; code++) {
+         decoder->len[code] = *lengths++;
          decoder->symbol[code] = 0;
-         for(u32 j=0; j<decoder->len[code]; j++) 
+         for(u32 j = 0; j < decoder->len[code]; j++)
             ((u8*) &decoder->symbol[code])[j] = buf[pos++]; // note this enforces 'little endian' symbols
       }
-   }
-   if (decoder->zeroTerminated) lenHisto[0]++; 
+   } else {
+      if (decoder->zeroTerminated) lenHisto[0]--; // if zeroTerminated, then symbol "" aka 1-byte code=0, is not stored at the end
 
-   // sorted codes: the encoder wrote each symbol's rank in byte order, so sort the symbols into that order here
-   if (buf[8] & 2) {
-      u32 n = code;
-      u8 order[256];
-      for (u32 i=0; i<n; i++) order[i] = (u8) i;
-      std::sort(order, order+n, [decoder](u8 a, u8 b) {
-         const u8 *x = (const u8*) &decoder->symbol[a], *y = (const u8*) &decoder->symbol[b];
-         u32 la = decoder->len[a], lb = decoder->len[b], m = la < lb ? la : lb;
-         int c = memcmp(x, y, m);
-         return c != 0 ? c < 0 : la < lb;
-      });
-      u64 symbol[256]; u8 len[256];
-      for (u32 r=0; r<n; r++) { symbol[r] = decoder->symbol[order[r]]; len[r] = decoder->len[order[r]]; }
-      for (u32 r=0; r<n; r++) { decoder->symbol[r] = symbol[r]; decoder->len[r] = len[r]; }
+      // now get all symbols from the buffer
+      for(u32 l=1; l<=8; l++) { /* l = 1,2,3,4,5,6,7,8 */
+         for(u32 i=0; i < lenHisto[(l&7) /* 1,2,3,4,5,6,7,0 */]; i++, code++)  {
+            decoder->len[code] = (l&7)+1; /* len = 2,3,4,5,6,7,8,1  */
+            decoder->symbol[code] = 0;
+            for(u32 j=0; j<decoder->len[code]; j++) 
+               ((u8*) &decoder->symbol[code])[j] = buf[pos++]; // note this enforces 'little endian' symbols
+         }
+      }
+      if (decoder->zeroTerminated) lenHisto[0]++; 
+   }
+
+   // the code frequencies, if the exporter attached them; zero means "unknown" to every reader
+   memset(decoder->count, 0, sizeof(decoder->count));
+   if (buf[8] & 4) {
+      for(u32 i = 0; i < 256; i++) {
+         u32 value = 0;
+         for(u32 j = 0; j < 4; j++) value |= ((u32) buf[pos++]) << (8*j);
+         decoder->count[i] = value;
+      }
    }
 
    // fill unused symbols with text "corrupt". Gives a chance to detect corrupted code sequences (if there are unused symbols).
