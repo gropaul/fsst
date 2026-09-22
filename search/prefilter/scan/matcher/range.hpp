@@ -9,63 +9,22 @@
 
 namespace fsst::search::prefilter::scan::matcher {
 
-#if defined(__ARM_NEON)
-
 struct Held {
-    uint8x16_t lo;
-    uint8x16_t width;
+    Reg lo;
+    Reg width;
 };
 
 inline Held hold(CodeRange r) {
-    return {vdupq_n_u8(r.begin), vdupq_n_u8(static_cast<uint8_t>(r.last - r.begin))};
+    return {splat(r.begin), splat(static_cast<uint8_t>(r.last - r.begin))};
 }
 
-inline Hits inside(Held h, Vectors codes) {
-    Hits out;
-    for (size_t i = 0; i < 4; ++i) out[i] = vcleq_u8(vsubq_u8(codes[i], h.lo), h.width);
-    return out;
+// x86 has no unsigned byte compare; the compiler emits max plus compare.
+inline V inside(Held h, V codes) {
+    return (V)((codes - spread(h.lo)) <= spread(h.width));
 }
 
-#elif defined(__AVX512BW__)
-
-struct Held {
-    __m512i lo;
-    __m512i width;
-};
-
-inline Held hold(CodeRange r) {
-    return {_mm512_set1_epi8(static_cast<char>(r.begin)), _mm512_set1_epi8(static_cast<char>(r.last - r.begin))};
-}
-
-inline Hits inside(Held h, Vectors codes) {
-    return _mm512_cmple_epu8_mask(_mm512_sub_epi8(codes, h.lo), h.width);
-}
-
-#elif defined(__AVX2__)
-
-struct Held {
-    __m256i lo;
-    __m256i width;
-};
-
-inline Held hold(CodeRange r) {
-    return {_mm256_set1_epi8(static_cast<char>(r.begin)), _mm256_set1_epi8(static_cast<char>(r.last - r.begin))};
-}
-
-// No unsigned byte compare: x <= width iff max(x, width) == width.
-inline Hits inside(Held h, Vectors codes) {
-    Hits out;
-    for (size_t i = 0; i < 2; ++i) {
-        __m256i x = _mm256_sub_epi8(codes[i], h.lo);
-        out[i] = _mm256_cmpeq_epi8(_mm256_max_epu8(x, h.width), h.width);
-    }
-    return out;
-}
-
-#endif
-
-inline Hits check_ranges(Hits hit, const std::vector<Held>& held, Vectors codes) {
-    for (const Held& h : held) hit = or_hits(hit, inside(h, codes));
+inline V check_ranges(V hit, const std::vector<Held>& held, V codes) {
+    for (const Held& h : held) hit = hit | inside(h, codes);
     return hit;
 }
 
@@ -77,7 +36,7 @@ class Range {
     }
 
     bool check(const uint8_t* codes, Mask& bits) const {
-        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
+        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](V v, const uint8_t*) {
             return check_ranges(inside(first_, v), rest_, v);
         });
     }

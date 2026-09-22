@@ -25,82 +25,26 @@ class Nibble {
         for (uint8_t t : cover.points) set(t);
         for (CodeRange r : cover.ranges)
             for (unsigned c = r.begin; c <= r.last; ++c) set(static_cast<uint8_t>(c));
-#if defined(__ARM_NEON)
-        low_ = vld1q_u8(low);
-        high_ = vld1q_u8(high);
-#else
-        low_ = broadcast_table(low);
-        high_ = broadcast_table(high);
-#endif
+        low_ = table(low);
+        high_ = table(high);
     }
 
     // 1 << (high nibble % 8), indexed by the whole high nibble.
     static constexpr uint8_t BIT[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
 
-#if defined(__ARM_NEON)
     bool check(const uint8_t* codes, Mask& bits) const {
-        const uint8x16_t bit = vld1q_u8(BIT);
-        const uint8x16_t row = vdupq_n_u8(0x8f);
-        const uint8x16_t half = vdupq_n_u8(0x80);
-        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
-            Hits out;
-            for (size_t i = 0; i < 4; ++i) {
-                // bit 7 kept in the index: vqtbl1q returns 0 for the wrong half.
-                uint8x16_t index = vandq_u8(v[i], row);
-                uint8x16_t rows = vorrq_u8(vqtbl1q_u8(low_, index),
-                                           vqtbl1q_u8(high_, veorq_u8(index, half)));
-                out[i] = vtstq_u8(rows, vqtbl1q_u8(bit, vshrq_n_u8(v[i], 4)));
-            }
-            return out;
+        const Reg bit = table(BIT);
+        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](V v, const uint8_t*) {
+            // bit 7 kept in the index: the lookup returns 0 for the wrong half.
+            V index = v & 0x8f;
+            V rows = lookup(low_, index) | lookup(high_, index ^ 0x80);
+            return (V)((rows & lookup(bit, v >> 4)) != 0);
         });
     }
 
    private:
-    uint8x16_t low_;
-    uint8x16_t high_;
-#elif defined(__AVX512BW__)
-    bool check(const uint8_t* codes, Mask& bits) const {
-        const __m512i bit = broadcast_table(BIT);
-        const __m512i row = _mm512_set1_epi8(static_cast<char>(0x8f));
-        const __m512i half = _mm512_set1_epi8(static_cast<char>(0x80));
-        const __m512i nibble = _mm512_set1_epi8(0x0f);
-        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
-            // bit 7 kept in the index: vpshufb returns 0 for the wrong half.
-            __m512i index = _mm512_and_si512(v, row);
-            __m512i rows = _mm512_or_si512(_mm512_shuffle_epi8(low_, index),
-                                           _mm512_shuffle_epi8(high_, _mm512_xor_si512(index, half)));
-            __m512i n1 = _mm512_and_si512(_mm512_srli_epi16(v, 4), nibble);
-            return _mm512_test_epi8_mask(rows, _mm512_shuffle_epi8(bit, n1));
-        });
-    }
-
-   private:
-    __m512i low_;
-    __m512i high_;
-#elif defined(__AVX2__)
-    bool check(const uint8_t* codes, Mask& bits) const {
-        const __m256i bit = broadcast_table(BIT);
-        const __m256i row = _mm256_set1_epi8(static_cast<char>(0x8f));
-        const __m256i half = _mm256_set1_epi8(static_cast<char>(0x80));
-        const __m256i nibble = _mm256_set1_epi8(0x0f);
-        return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](Vectors v, const uint8_t*) {
-            Hits out;
-            for (size_t i = 0; i < 2; ++i) {
-                // bit 7 kept in the index: vpshufb returns 0 for the wrong half.
-                __m256i index = _mm256_and_si256(v[i], row);
-                __m256i rows = _mm256_or_si256(_mm256_shuffle_epi8(low_, index),
-                                               _mm256_shuffle_epi8(high_, _mm256_xor_si256(index, half)));
-                __m256i n1 = _mm256_and_si256(_mm256_srli_epi16(v[i], 4), nibble);
-                out[i] = nonzero(_mm256_and_si256(rows, _mm256_shuffle_epi8(bit, n1)));
-            }
-            return out;
-        });
-    }
-
-   private:
-    __m256i low_;
-    __m256i high_;
-#endif
+    Reg low_;
+    Reg high_;
 };
 
 }  // namespace fsst::search::prefilter::scan::matcher
