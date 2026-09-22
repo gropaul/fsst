@@ -18,9 +18,11 @@ namespace fs = std::filesystem;
 
 constexpr const char* STREAMS[] = {"ch/hits/URL_1m"};
 constexpr const char* ENCODING = "fsst";
-// 8 MiB of code stream, the same working set the u16 sweep walks at two bytes
-// a code, so the two are read against one memory-bandwidth ceiling.
-constexpr size_t CODES = 8u << 20;
+// 1 MiB of code stream, the same working set the u16 sweep walks at two bytes
+// a code, so the two are read against one memory-bandwidth ceiling. At 8 MiB
+// the compare kernel at K = 1 measured the c7a's 99.8 GB/s sequential read
+// rather than itself; 1 MiB stays under every fitted machine's ceiling.
+constexpr size_t CODES = 1u << 20;
 constexpr size_t CHECK_CODES = CODES / 16;
 constexpr size_t SAMPLE = 0;
 
