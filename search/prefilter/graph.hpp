@@ -29,6 +29,11 @@ constexpr size_t PROBE_SET_SIZE_LIMIT_K1 = 16;
 // two consecutive greedy symbols, only in the cut graph of CutGraph::with_pairs.
 enum class Probe : uint8_t { Point, Escape, Range, Set, SetTooBig, Pair };
 
+// Where the pattern must sit in the row. None is a substring anywhere. Start is a prefix: the pattern
+// begins at the row's first byte, so the alignments that begin it inside a symbol are not layouts it can
+// have. See docs/prefilter.md section 4.
+enum class Anchor : uint8_t { None, Start };
+
 struct Edge {
     uint32_t from;
     uint32_t to;
@@ -257,14 +262,16 @@ struct Builder {
 }  // namespace detail
 
 inline AlignmentGraph build_alignment_graph(const Dictionary& dict, const uint8_t* needle, size_t n,
-                                            const Frequency& freq) {
+                                            const Frequency& freq, Anchor anchor = Anchor::None) {
     assert(n > 0);
     assert(dict.sorted());
     detail::Builder b{dict, needle, n, freq, {}, std::vector<bool>(n, false)};
     Candidates cand = alignment_candidates(dict, needle, n);
     size_t kmax = std::min(n, MAX_TOKEN_SIZE);
     for (size_t k = 0; k < kmax; ++k) {
-        if (k != 0 && cand.count[k] == 0) continue;
+        // anchored at the start there is one layout, the greedy chain from offset 0: an alignment k >= 1
+        // has the needle beginning inside a symbol, and a contained symbol has it past the symbol's start
+        if (k != 0 && (anchor == Anchor::Start || cand.count[k] == 0)) continue;
         b.ensure_chain(k);
         if (k != 0) {
             if (cand.count[k] <= PROBE_SET_SIZE_LIMIT)
@@ -273,7 +280,7 @@ inline AlignmentGraph build_alignment_graph(const Dictionary& dict, const uint8_
                 b.add(0, static_cast<uint32_t>(k), Probe::SetTooBig, {});
         }
     }
-    if (!cand.contained.empty()) b.add(0, b.sink(), Probe::Set, cand.contained);
+    if (anchor == Anchor::None && !cand.contained.empty()) b.add(0, b.sink(), Probe::Set, cand.contained);
     assert(b.edges.size() <= 2 * n + 16);
     return AlignmentGraph{std::move(b.edges), n};
 }
