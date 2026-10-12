@@ -74,7 +74,7 @@ void pattern_rows(const uint8_t* codes, size_t len, const O* row_offsets, size_t
         for (size_t row = 0; row + 1 < offsets_len; ++row) {
             const size_t start = row_offsets[row], end = row_offsets[row + 1];
             if (start == end) continue;
-            if (!plan.runs[0].walk.check(dict, codes, start, end, start)) continue;
+            if (!plan.runs[0].walk.check_anchored(dict, codes, start, end)) continue;
             bool all = true;
             for (size_t i = 1; i < plan.runs.size() && all; ++i) all = row_has(dict, codes, start, end, plan.runs[i]);
             if (all) out.push_back(row);

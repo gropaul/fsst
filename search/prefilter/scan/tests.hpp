@@ -25,6 +25,11 @@ inline int g_failures = 0;
         }                                                                             \
     } while (0)
 
+// A stage-two check that passes every hit: the scan alone, without a walk.
+struct AcceptAll {
+    bool passes(size_t, size_t, size_t) const { return true; }
+};
+
 struct Rng {
     uint64_t s;
     uint64_t next() {

@@ -214,7 +214,7 @@ template <typename M, typename R>
 static void driver_agrees(const char* name, const ProbeCover& cover, const std::vector<uint8_t>& codes,
                           const std::vector<uint32_t>& offsets) {
     std::vector<size_t> got;
-    both_stages<M, R>(cover, codes.data(), codes.size(), offsets.data(), offsets.size(), Superset{},
+    both_stages<M, R>(cover, codes.data(), codes.size(), offsets.data(), offsets.size(), AcceptAll{},
                       got);
     CHECK_MSG(got == rows_oracle(cover, codes, offsets), "%s: rows differ over %zu codes", name,
               codes.size());
@@ -238,7 +238,7 @@ static void a_pair_across_the_block_seam() {
                                                                    offsets);
         std::vector<size_t> got;
         both_stages<EqOr<false>, resolver::LinearSeek<uint32_t>>(pair, codes.data(), len, offsets.data(),
-                                                                 offsets.size(), Superset{}, got);
+                                                                 offsets.size(), AcceptAll{}, got);
         CHECK(got == std::vector<size_t>{1});
     }
 }
@@ -283,16 +283,16 @@ static void padding_makes_no_candidate() {
     std::vector<uint32_t> offsets{0, 10};
     std::vector<size_t> got;
     both_stages<Nibble<true>, resolver::LinearSeek<uint32_t>>(ProbeCover{{0}, {}}, codes.data(), codes.size(),
-                                                              offsets.data(), offsets.size(), Superset{}, got);
+                                                              offsets.data(), offsets.size(), AcceptAll{}, got);
     CHECK(got.empty());
     both_stages<Nibble<false>, resolver::LinearSeek<uint32_t>>(ProbeCover{{}, {{0, 3}}}, codes.data(),
                                                                codes.size(), offsets.data(),
-                                                               offsets.size(), Superset{}, got);
+                                                               offsets.size(), AcceptAll{}, got);
     CHECK(got.empty());
     codes[9] = 0;
     both_stages<EqOr<true>, resolver::GallopSeek<uint32_t>>(ProbeCover{{0}, {}}, codes.data(),
                                                             codes.size(), offsets.data(), offsets.size(),
-                                                            Superset{}, got);
+                                                            AcceptAll{}, got);
     CHECK((got == std::vector<size_t>{0}));
 }
 

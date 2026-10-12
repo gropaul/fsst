@@ -49,16 +49,15 @@ struct Dictionary {
 
     // The symbols prefix[0..m) is a prefix of, the exact one included:
     // contiguous in a sorted table.
-    bool prefix_range(const uint8_t* prefix, size_t m, CodeRange& out) const {
+    CodeRange prefix_range(const uint8_t* prefix, size_t m) const {
         size_t first = count, last = 0;
         for (size_t c = 0; c < count; ++c)
             if (length(c) >= m && std::memcmp(symbol(c), prefix, m) == 0) {
                 if (first == count) first = c;
                 last = c;
             }
-        if (first == count) return false;
-        out = CodeRange{static_cast<uint8_t>(first), static_cast<uint8_t>(last)};
-        return true;
+        if (first == count) return CodeRange::none();
+        return CodeRange{static_cast<uint8_t>(first), static_cast<uint8_t>(last)};
     }
 };
 

@@ -78,14 +78,10 @@ int main(int argc, char** argv) {
     const uint8_t* pat = reinterpret_cast<const uint8_t*>(pattern.data());
     Analysis a = analyze(pat, pattern.size(), dict, freq, n);
 
-    std::vector<size_t> exact, superset;
+    std::vector<size_t> exact;
     double exact_s = best([&] {
         exact.clear();
         candidate_rows(codes, code_count, offsets.data(), offsets.size(), dict, a, exact);
-    });
-    double superset_s = best([&] {
-        superset.clear();
-        superset_rows(codes, code_count, offsets.data(), offsets.size(), a, superset);
     });
 
     std::vector<size_t> want;
@@ -113,8 +109,6 @@ int main(int argc, char** argv) {
                     freq.pair_estimate(p));
     std::printf("exact    %8.0f us  %6.2f GB/s raw  %6.2f GB/s codes  %zu rows  %s\n", exact_s * 1e6,
                 raw_bytes / exact_s / 1e9, code_count / exact_s / 1e9, exact.size(), exact == want ? "== memmem" : "!= memmem");
-    std::printf("superset %8.0f us  %6.2f GB/s raw  %6.2f GB/s codes  %zu rows\n", superset_s * 1e6,
-                raw_bytes / superset_s / 1e9, code_count / superset_s / 1e9, superset.size());
     std::printf("memmem   %8.0f us  %6.2f GB/s raw  %zu rows (uncompressed rows, the reference)\n", memmem_s * 1e6,
                 raw_bytes / memmem_s / 1e9, want.size());
     return exact == want ? 0 : 1;

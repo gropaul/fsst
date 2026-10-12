@@ -11,6 +11,9 @@ struct CodeRange {
     uint8_t begin;
     uint8_t last;
 
+    static CodeRange none() { return CodeRange{1, 0}; }
+
+    bool empty() const { return begin > last; }
     bool contains(uint8_t code) const { return begin <= code && code <= last; }
 };
 

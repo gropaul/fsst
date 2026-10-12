@@ -19,11 +19,6 @@ constexpr size_t BLOCK = 4096;
 using Block = std::array<uint8_t, BLOCK + 16>;
 using Mask = std::array<uint64_t, BLOCK / 64>;
 
-// Stage two asks this of every hit before its row goes out.
-struct Superset {
-    bool passes(size_t, size_t, size_t) const { return true; }
-};
-
 inline void clear_from(Mask& bits, size_t valid) {
     if (valid >= BLOCK) return;
     bits[valid / 64] &= (uint64_t{1} << (valid % 64)) - 1;

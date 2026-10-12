@@ -56,9 +56,9 @@ struct RejectEven {
 template <typename Offset>
 static void every_resolver(const std::string& name, const std::vector<uint64_t>& mask,
                            const std::vector<Offset>& offsets) {
-    auto want = expected(mask, offsets, Superset{});
-    CHECK_MSG(resolve<LinearSeek<Offset>>(mask, offsets, Superset{}) == want, "linear: %s", name.c_str());
-    CHECK_MSG(resolve<GallopSeek<Offset>>(mask, offsets, Superset{}) == want, "gallop: %s", name.c_str());
+    auto want = expected(mask, offsets, AcceptAll{});
+    CHECK_MSG(resolve<LinearSeek<Offset>>(mask, offsets, AcceptAll{}) == want, "linear: %s", name.c_str());
+    CHECK_MSG(resolve<GallopSeek<Offset>>(mask, offsets, AcceptAll{}) == want, "gallop: %s", name.c_str());
     auto odd = expected(mask, offsets, RejectEven{});
     CHECK_MSG(resolve<LinearSeek<Offset>>(mask, offsets, RejectEven{}) == odd, "linear odd: %s",
               name.c_str());
@@ -126,7 +126,7 @@ static void a_row_hit_in_two_blocks() {
     set(BLOCK + 9);
     set(BLOCK + 10);
     every_resolver("two blocks", mask, offsets);
-    CHECK((resolve<LinearSeek<uint32_t>>(mask, offsets, Superset{}) == std::vector<size_t>{2, 3}));
+    CHECK((resolve<LinearSeek<uint32_t>>(mask, offsets, AcceptAll{}) == std::vector<size_t>{2, 3}));
 }
 
 static void the_ends_of_the_stream() {
@@ -143,7 +143,7 @@ static void one_hit_after_many_rows() {
     std::vector<uint64_t> mask(CODES / 64 + 1, 0);
     mask[(CODES - 1) / 64] |= uint64_t{1} << ((CODES - 1) % 64);
     every_resolver("one hit at the end of 12k rows", mask, offsets);
-    CHECK((resolve<GallopSeek<uint32_t>>(mask, offsets, Superset{}) == std::vector<size_t>{CODES - 1}));
+    CHECK((resolve<GallopSeek<uint32_t>>(mask, offsets, AcceptAll{}) == std::vector<size_t>{CODES - 1}));
 }
 
 static void wide_offsets() {

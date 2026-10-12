@@ -133,7 +133,7 @@ static void resolve_stream(const std::vector<uint64_t>& mask, const std::vector<
     Mask bits;
     for (size_t block : hit) {
         std::copy_n(mask.begin() + block * WORDS, WORDS, bits.begin());
-        resolver.rows(bits, block * BLOCK, Superset{}, out);
+        resolver.rows(bits, block * BLOCK, AcceptAll{}, out);
     }
 }
 

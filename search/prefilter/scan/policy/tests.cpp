@@ -123,15 +123,15 @@ static void the_planned_scan_agrees_with_the_rows() {
         for (size_t covered : {size_t{0}, size_t{5}, codes.size() / 100, codes.size() / 2}) {
             std::vector<size_t> got;
             execute(cover, codes.data(), codes.size(), offsets.data(), offsets.size(), covered, codes.size(),
-                    Superset{}, got);
+                    AcceptAll{}, got);
             CHECK_MSG(got == want, "K=%zu R=%zu covered %zu", cover.points.size(), cover.ranges.size(), covered);
         }
     }
     std::vector<size_t> got;
-    execute(ProbeCover{}, codes.data(), codes.size(), offsets.data(), offsets.size(), 0, codes.size(), Superset{}, got);
+    execute(ProbeCover{}, codes.data(), codes.size(), offsets.data(), offsets.size(), 0, codes.size(), AcceptAll{}, got);
     CHECK(got.empty());
     std::vector<uint32_t> rowless{0};
-    execute(probe(1, 0), codes.data(), 0, rowless.data(), rowless.size(), 0, 0, Superset{}, got);
+    execute(probe(1, 0), codes.data(), 0, rowless.data(), rowless.size(), 0, 0, AcceptAll{}, got);
     CHECK(got.empty());
 }
 

@@ -169,7 +169,7 @@ static Timed time_kernel(const Probe& probe, const Stream& s) {
     });
     std::vector<size_t> found;
     both_stages<M, resolver::LinearSeek<uint32_t>>(cover, s.checked, s.checked_len, s.check_rows->data(),
-                                                   s.check_rows->size(), Superset{}, found);
+                                                   s.check_rows->size(), AcceptAll{}, found);
     return {seconds, std::move(found)};
 }
 

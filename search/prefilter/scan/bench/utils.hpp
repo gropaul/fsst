@@ -17,6 +17,11 @@ namespace fsst::search::prefilter::scan::bench {
 
 constexpr int PASSES = 5;
 
+// A stage-two check that passes every hit: the scan alone, without a walk.
+struct AcceptAll {
+    bool passes(size_t, size_t, size_t) const { return true; }
+};
+
 // Seconds of the fastest of PASSES runs after one untimed. A run the clock
 // cannot resolve is repeated inside the timed region until it can.
 template <typename Run>

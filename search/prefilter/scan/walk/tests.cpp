@@ -118,20 +118,20 @@ static void walk_decides(const std::string& singles, const std::vector<std::stri
                          const std::vector<std::string>& rows, const std::string& needle) {
     Column col = column(singles, extra, rows);
     const uint8_t* pat = reinterpret_cast<const uint8_t*>(needle.data());
-    const size_t n = needle.size();
+    const size_t needle_len = needle.size();
     Frequency freq = Frequency::of(col.codes.data(), col.codes.size());
-    AlignmentGraph graph = build_alignment_graph(col.dict, pat, n, freq);
-    Candidates cand = alignment_candidates(col.dict, pat, n);
+    AlignmentGraph graph = build_alignment_graph(col.dict, pat, needle_len, freq);
+    Candidates cand = alignment_candidates(col.dict, pat, needle_len);
     Walk walk(graph, pat);
     for (size_t row = 0; row < rows.size(); ++row) {
         size_t start = col.offsets[row], end = col.offsets[row + 1];
         std::vector<Unit> u = units(col.dict, col.codes.data() + start, end - start);
         std::vector<bool> expected(end - start, false);
-        for (size_t s = 0; s + n <= rows[row].size(); ++s) {
-            if (rows[row].compare(s, n, needle) != 0) continue;
+        for (size_t s = 0; s + needle_len <= rows[row].size(); ++s) {
+            if (rows[row].compare(s, needle_len, needle) != 0) continue;
             for (size_t i = 0; i < u.size(); ++i) {
-                if (!u[i].head || u[i].end <= s || u[i].start >= s + n) continue;
-                bool entry = u[i].start < s && u[i].end < s + n;
+                if (!u[i].head || u[i].end <= s || u[i].start >= s + needle_len) continue;
+                bool entry = u[i].start < s && u[i].end < s + needle_len;
                 if (entry && cand.count[u[i].end - s] > PROBE_SET_SIZE_LIMIT) continue;
                 expected[i] = true;
             }
@@ -227,6 +227,93 @@ static void runs_of_escape_markers() {
     walk_decides(LETTERS, {"ab"}, rows, ff + ff + ff);
 }
 
+// The prefix walk from the row's first code over runs of 255: a row starting
+// with 0xff starts with the escape pair 255 255.
+static void prefix_through_escaped_escapes() {
+    const std::string ff(1, '\xff');
+    const std::vector<std::string> rows = {ff, ff + ff, ff + ff + ff, ff + "b", ff + ff + "b", "a" + ff,
+                                           "a" + ff + ff, "ab" + ff + "b", "b" + ff, "ab", ff + "ab" + ff};
+    const std::vector<std::string> needles = {ff,       ff + ff,  ff + ff + ff, ff + "b",       ff + ff + "b",
+                                              "a" + ff, "ab" + ff, ff + "ab",    "ab" + ff + "b"};
+    Column col = column(LETTERS, {"ab"}, rows);
+    Frequency freq = Frequency::of(col.codes.data(), col.codes.size());
+    for (const std::string& needle : needles) {
+        const uint8_t* pat = reinterpret_cast<const uint8_t*>(needle.data());
+        AlignmentGraph graph = build_alignment_graph(col.dict, pat, needle.size(), freq, Anchor::Start);
+        Walk walk(graph, pat);
+        for (size_t row_index = 0; row_index < rows.size(); ++row_index) {
+            const size_t row_start_index = col.offsets[row_index], row_end_index = col.offsets[row_index + 1];
+            const bool got =
+                walk.check_anchored(col.dict, col.codes.data(), row_start_index, row_end_index);
+            const bool expected = rows[row_index].compare(0, needle.size(), needle) == 0;
+            CHECK_MSG(got == expected, "needle %zu bytes row %zu", needle.size(), row_index);
+        }
+    }
+}
+
+// The suffix walk from the row's last code against the rows that end with
+// the needle.
+static void ends_decides(const std::string& singles, const std::vector<std::string>& extra,
+                         const std::vector<std::string>& rows, const std::string& needle) {
+    Column col = column(singles, extra, rows);
+    const uint8_t* pat = reinterpret_cast<const uint8_t*>(needle.data());
+    Frequency freq = Frequency::of(col.codes.data(), col.codes.size());
+    AlignmentGraph graph = build_alignment_graph(col.dict, pat, needle.size(), freq, Anchor::End);
+    Walk walk(graph, pat);
+    for (size_t row_index = 0; row_index < rows.size(); ++row_index) {
+        const size_t row_start_index = col.offsets[row_index], row_end_index = col.offsets[row_index + 1];
+        const std::string& row = rows[row_index];
+        const bool expected =
+            row.size() >= needle.size() && row.compare(row.size() - needle.size(), needle.size(), needle) == 0;
+        const bool got = walk.check_anchored(col.dict, col.codes.data(), row_start_index, row_end_index);
+        CHECK_MSG(got == expected, "needle %s row %zu", needle.c_str(), row_index);
+    }
+}
+
+// The needle starts at a symbol boundary, inside a symbol (agoo), or wholly
+// inside the last symbol (xgoogle); symbols running past the needle (googlez,
+// gles) must not end it.
+static void suffix_through_entries_and_contained_symbols() {
+    const std::vector<std::string> extra = {"goo", "gl", "le", "gle", "gles", "agoo", "xgoogle", "googlez", "oogle"};
+    const std::vector<std::string> rows = {"google", "xgoogle", "agoogle", "googlez", "googles", "goo gle",
+                                           "zgoogle", "googl", "oogle", "le", "e", "gle", "googlegoogle",
+                                           "googlezgoogle", "xgooglex", ""};
+    for (const std::string& needle : {"google", "oogle", "gle", "le", "e", "goo", "googlez", "xgoogle", "googlegoogle"})
+        ends_decides(all_bytes(), extra, rows, needle);
+}
+
+// Escapes as the row's last code, in the middle of the needle, and 0xff
+// escaped as 255 255 at the end.
+static void suffix_through_escapes() {
+    const std::string ff(1, '\xff');
+    const std::vector<std::string> rows = {"go#gle", "xgo#gle", "go#gle#", "#", "##", "ab#", "a#b", ff,
+                                           ff + ff, "a" + ff, "a" + ff + ff, ff + "b", "ab" + ff + "b", ""};
+    for (const std::string& needle :
+         {std::string("#"), std::string("##"), std::string("go#gle"), std::string("gle#"), ff, ff + ff, "a" + ff,
+          ff + "b", "b" + ff, "ab" + ff + "b"})
+        ends_decides(LETTERS, {"goo", "gl", "go", "le", "ab"}, rows, needle);
+}
+
+static void random_rows_against_suffix() {
+    Rng rng{23};
+    std::vector<std::string> extra = {"ab", "abc", "bca", "cab", "aab", "abcabc", "ca", "bb"};
+    for (size_t round = 0; round < 40; ++round) {
+        std::vector<std::string> rows;
+        for (size_t r = 0; r < 30; ++r) {
+            std::string row(rng.below(12), 'a');
+            for (char& c : row) c = "abc#\xff"[rng.below(5)];
+            rows.push_back(row);
+        }
+        std::string needle(1 + rng.below(5), 'a');
+        for (char& c : needle) c = "abc#\xff"[rng.below(5)];
+        // a needle that is some row's tail, so the true case is exercised
+        const std::string& row = rows[rng.below(rows.size())];
+        std::string tail = row.substr(row.size() - std::min<size_t>(row.size(), 1 + rng.below(5)));
+        ends_decides("abc", extra, rows, needle);
+        if (!tail.empty()) ends_decides("abc", extra, rows, tail);
+    }
+}
+
 static void random_rows_against_containment() {
     Rng rng{19};
     std::vector<std::string> extra = {"ab", "abc", "bca", "cab", "aab", "abcabc", "ca", "bb"};
@@ -253,6 +340,10 @@ int main() {
     escapes_inside_and_around_the_occurrence();
     a_literal_equal_to_a_covered_code();
     runs_of_escape_markers();
+    prefix_through_escaped_escapes();
     random_rows_against_containment();
+    suffix_through_entries_and_contained_symbols();
+    suffix_through_escapes();
+    random_rows_against_suffix();
     return finish("prefilter walk tests");
 }

@@ -154,7 +154,7 @@ probe set plus that set's term frequency.
 | `SetTooBig` | `source -> k` | more tokens qualified than the cap; never materialised; a cut may not select it |
 
 Alignment 0 needs no entry edge; its layouts start at the source. Caps:
-`PROBE_SET_SIZE_LIMIT = 512` for `k ≥ 2`, `PROBE_SET_SIZE_LIMIT_K1 = 16`
+`PROBE_SET_SIZE_LIMIT = 512` for `k ≥ 2`, `PROBE_SET_SIZE_LIMIT_ALIGNMENT_1 = 16`
 for `k = 1`, because nearly every byte ends more than 16 tokens. A k=1 pass
 that passes 16 sets `count[1] = 513` so the set reads as too big. With ≤ 255
 FSST symbols only `k = 1` can ever be too big.
@@ -558,7 +558,7 @@ and for the policy `old: scan/novel/policy/tests.rs` (new has none):
   cover (`empty_probe_cover_still_appends_nothing`);
   `superset_verified_by_memmem_matches_the_walk`. Port: `prefilter/tests.cpp`
   compresses its rows with `fsst_create`/`fsst_compress`, checks the graph
-  invariants, the superset and the exact rows through the walk on URL text,
+  invariants, the cover holding a code of every matching row and the exact rows through the walk on URL text,
   repetitive text, random bytes and text with escaped bytes inside the needle.
 - **Graph invariants** (`check_graph`): `from < to` on every edge; the sink
   is unreachable when the cut's edges are blocked; the cut never contains
@@ -677,4 +677,4 @@ draws it.
 | location | new sources under `search/` in this repo, C++17, library target |
 | pair probes | in, via the unrolled cut graph (§4), a one-symbol terminal range pairs too; pair frequency is counted exactly (`Frequency::pairs`, 256 KB, same pass; the independence estimate ranked `g`,`o` at 3.4k against 25k real and bought nothing); the sweep has pairs-alone rows at P in {1, 2, 4, 8} (`pairs` column) and `eq_or` is fitted at 0.01674 ns per code per pair |
 | raw codes | sorted codes, written by the compressor: `fsst_sort_codes` permutes the codes at the write sites into byte order of their symbols (§3); a `Range` edge is one `CodeRange` weighing `(0, 1)`, a `Set` edge's weight counts the runs its codes merge to |
-| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `Superset`, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, exact `candidate_rows`, `superset_rows`, `MAX_PATTERN_LEN`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |
+| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, exact `candidate_rows`, `MAX_PATTERN_LEN`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |

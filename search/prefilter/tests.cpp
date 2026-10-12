@@ -185,10 +185,10 @@ static void check_cut_graph(const Column& col, const std::string& pat, const std
 static size_t g_pair_edges = 0;
 
 static void check_graph(const Column& col, const std::string& pat, const std::vector<size_t>& want) {
-    const size_t n = pat.size();
-    AlignmentGraph g = build_alignment_graph(col.dict, bytes(pat), n, col.freq);
+    const size_t needle_len = pat.size();
+    AlignmentGraph g = build_alignment_graph(col.dict, bytes(pat), needle_len, col.freq);
     for (const Edge& e : g.edges) {
-        CHECK_MSG(e.from < e.to && e.to <= n, "%s: edge %u -> %u", pat.c_str(), e.from, e.to);
+        CHECK_MSG(e.from < e.to && e.to <= needle_len, "%s: edge %u -> %u", pat.c_str(), e.from, e.to);
         CHECK(e.probe != Probe::Pair);
         if (e.probe == Probe::Escape) {
             ++g_escape_edges;
@@ -197,9 +197,10 @@ static void check_graph(const Column& col, const std::string& pat, const std::ve
         if (e.probe == Probe::Range) {
             CHECK(e.codes.empty() && e.points == 0 && e.ranges == 1 && e.range.begin <= e.range.last);
             // Exactly the symbols the suffix is a prefix of, contiguous because the codes are sorted.
-            size_t m = n - e.from;
+            size_t tail_len = needle_len - e.from;
             for (size_t c = 0; c < col.dict.count; ++c) {
-                bool prefixed = col.dict.length(c) >= m && std::memcmp(col.dict.symbol(c), bytes(pat) + e.from, m) == 0;
+                bool prefixed = col.dict.length(c) >= tail_len &&
+                                std::memcmp(col.dict.symbol(c), bytes(pat) + e.from, tail_len) == 0;
                 CHECK_MSG(prefixed == e.range.contains(static_cast<uint8_t>(c)), "%s: range %u-%u at code %zu",
                           pat.c_str(), e.range.begin, e.range.last, c);
             }
@@ -212,7 +213,7 @@ static void check_graph(const Column& col, const std::string& pat, const std::ve
             CHECK(e.points == shape.points.size() && e.ranges == shape.ranges.size());
         }
     }
-    CHECK_MSG(g.edges.size() <= 2 * n + 16, "%s: %zu edges", pat.c_str(), g.edges.size());
+    CHECK_MSG(g.edges.size() <= 2 * needle_len + 16, "%s: %zu edges", pat.c_str(), g.edges.size());
     check_cut_graph(col, pat, want, CutGraph::plain(g));
     CutGraph paired = CutGraph::with_pairs(g, col.freq);
     for (const Edge& e : paired.edges) g_pair_edges += e.probe == Probe::Pair;
@@ -221,36 +222,29 @@ static void check_graph(const Column& col, const std::string& pat, const std::ve
     check_cut_graph(col, pat, want, paired);
 }
 
-// Every pattern against byte containment: the graph's invariants, then the
-// planned cover run as a superset.
+// Every pattern against byte containment: the graph's invariants, the
+// cover holding a code of every matching row, then the walk's exact rows.
 static void check(const Column& col, const std::vector<std::string>& patterns) {
     for (const std::string& pat : patterns) {
         std::vector<size_t> want = rows_containing(col, pat);
         if (!pat.empty()) check_graph(col, pat, want);
         Analysis a = analyze(bytes(pat), pat.size(), col.dict, col.freq, col.row_count());
-        std::vector<size_t> got;
-        superset_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), a, got);
-        if (pat.empty()) {
-            CHECK(a.matches_all && got.size() == col.row_count());
-            for (size_t r = 0; r < got.size(); ++r) CHECK(got[r] == r);
-            continue;
-        }
-        CHECK(a.covered_frequency == col.freq.of_cover(a.cover));
-        CHECK(a.total_frequency == col.codes.size());
-        for (size_t i = 1; i < got.size(); ++i) CHECK(got[i - 1] < got[i]);
-        CHECK_MSG(std::includes(got.begin(), got.end(), want.begin(), want.end()), "%s: the superset misses a row",
-                  pat.c_str());
-        for (size_t row : got) {
-            bool holds = false;
-            for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i)
-                holds |= a.cover.matches(col.codes.data(), i, col.codes.size());
-            CHECK_MSG(holds, "%s: row %zu emitted without a covered code or pair", pat.c_str(), row);
-        }
-        if (!want.empty()) CHECK_MSG(!a.cover.empty(), "%s: empty cover with matching rows", pat.c_str());
         std::vector<size_t> exact;
         candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, exact);
         CHECK_MSG(exact == want, "%s: the walk's rows differ from byte containment (%zu against %zu)", pat.c_str(),
                   exact.size(), want.size());
+        if (pat.empty()) {
+            CHECK(a.matches_all);
+            continue;
+        }
+        CHECK(a.covered_frequency == col.freq.of_cover(a.cover));
+        CHECK(a.total_frequency == col.codes.size());
+        for (size_t row : want) {
+            bool holds = false;
+            for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i)
+                holds |= a.cover.matches(col.codes.data(), i, col.codes.size());
+            CHECK_MSG(holds, "%s: matching row %zu holds no covered code or pair", pat.c_str(), row);
+        }
     }
 }
 
@@ -350,13 +344,85 @@ static void sound_with_escapes_inside_the_needle() {
     CHECK_MSG(g_pair_edges > 0, "no pattern built a pair edge");
 }
 
+// anchored_rows against byte prefix and suffix on rows the real encoder
+// compressed: the end anchor relies on its parse at the end of a string.
+static bool anchored_at(const std::string& row, const std::string& pat, Anchor anchor) {
+    if (row.size() < pat.size()) return false;
+    return row.compare(anchor == Anchor::Start ? 0 : row.size() - pat.size(), pat.size(), pat) == 0;
+}
+
+static void check_anchored(const Column& col, const std::vector<std::string>& patterns) {
+    std::vector<int32_t> starts;
+    std::vector<uint32_t> lengths;
+    for (size_t r = 0; r < col.row_count(); ++r) {
+        starts.push_back(static_cast<int32_t>(col.offsets[r]));
+        lengths.push_back(col.offsets[r + 1] - col.offsets[r]);
+    }
+    // every other row, as a selection from an earlier filter
+    std::vector<uint32_t> odd_rows;
+    for (uint32_t r = 1; r < col.row_count(); r += 2) odd_rows.push_back(r);
+    auto rows_of = [&](const scan::Walk& walk, const std::vector<uint32_t>* sel) {
+        const size_t count = sel ? sel->size() : col.row_count();
+        std::vector<uint32_t> got(count);
+        got.resize(anchored_rows(col.codes.data(), starts.data(), lengths.data(), sel ? sel->data() : nullptr, count,
+                                 col.dict, walk, got.data()));
+        return got;
+    };
+    for (const std::string& pat : patterns) {
+        if (pat.empty()) continue;
+        for (const Anchor anchor : {Anchor::Start, Anchor::End}) {
+            std::vector<uint32_t> want, want_odd;
+            for (uint32_t r = 0; r < col.row_count(); ++r) {
+                if (!anchored_at(col.rows[r], pat, anchor)) continue;
+                want.push_back(r);
+                if (r % 2 == 1) want_odd.push_back(r);
+            }
+            Analysis a = analyze(bytes(pat), pat.size(), col.dict, col.freq, col.row_count(), anchor);
+            std::vector<uint32_t> got = rows_of(a.walk, nullptr);
+            CHECK_MSG(got == want, "%s anchored at the %s: %zu rows against %zu", pat.c_str(),
+                      anchor == Anchor::Start ? "start" : "end", got.size(), want.size());
+            got = rows_of(a.walk, &odd_rows);
+            CHECK_MSG(got == want_odd, "%s anchored at the %s, odd rows: %zu rows against %zu", pat.c_str(),
+                      anchor == Anchor::Start ? "start" : "end", got.size(), want_odd.size());
+        }
+    }
+}
+
+// Patterns taken from the rows' heads and tails, so both anchors match, plus
+// whole rows and bytes the table escapes.
+static void anchored_rows_match_prefix_and_suffix() {
+    Rng rng{29};
+    std::vector<std::string> rows = url_rows(300, rng);
+    for (const char* r : {"aaaaaaaa", "aaa", "aa", "a", "appappapple", "apple", "app", "abcabcabc", "cab", ""})
+        rows.push_back(r);
+    std::string rare;
+    for (int b = 0x80; b < 0x100; ++b) rare.push_back(static_cast<char>(b));
+    for (const std::string& r : {rare, std::string("page\x80"), std::string("\x80page"), std::string("x\xff\xff"),
+                                 std::string("\xff\xffy"), std::string("\xff"), std::string("ab\x80\x81")})
+        rows.push_back(r);
+    Column col = compress_rows(rows);
+    std::vector<std::string> patterns = {"a", "aa", "aaa", "e", "le", "pple", "apple", "app", "abc", "cab",
+                                         "http", "https://", "https://www.example.com", "docs", "\x80",
+                                         "\xff", "\xff\xff", "\x80\x81", "page\x80", "zzz absent"};
+    for (size_t i = 0; i < 60; ++i) {
+        const std::string& row = rows[rng.below(rows.size())];
+        if (row.empty()) continue;
+        const size_t len = 1 + rng.below(std::min<size_t>(row.size(), 24));
+        patterns.push_back(row.substr(0, len));
+        patterns.push_back(row.substr(row.size() - len));
+    }
+    patterns.push_back(rows[7]);
+    patterns.push_back(rare);
+    check_anchored(col, patterns);
+}
+
 static void empty_probe_cover_appends_nothing() {
     Column col = compress_rows({"alpha", "beta", "gamma"});
     Analysis a = analyze(bytes("\x01\x02\x03"), 3, col.dict, col.freq, col.row_count());
     std::vector<size_t> got;
-    superset_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), a, got);
+    candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, got);
     CHECK(rows_containing(col, "\x01\x02\x03").empty());
-    CHECK(std::includes(got.begin(), got.end(), got.begin(), got.end()));
+    CHECK(got.empty());
 }
 
 static void false_zero_frequencies_cannot_hide_a_true_match() {
@@ -368,10 +434,7 @@ static void false_zero_frequencies_cannot_hide_a_true_match() {
     Analysis a = analyze(bytes(pat), pat.size(), col.dict, zeros, col.row_count());
     CHECK(!a.cover.empty());
     CHECK(a.covered_frequency == 0);
-    std::vector<size_t> got;
-    superset_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), a, got);
     std::vector<size_t> want = rows_containing(col, pat);
-    CHECK(std::includes(got.begin(), got.end(), want.begin(), want.end()));
     std::vector<size_t> exact;
     candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, exact);
     CHECK(exact == want);
@@ -448,6 +511,7 @@ int main() {
     sound_on_repetitive_text();
     sound_on_random_bytes();
     sound_with_escapes_inside_the_needle();
+    anchored_rows_match_prefix_and_suffix();
     empty_probe_cover_appends_nothing();
     false_zero_frequencies_cannot_hide_a_true_match();
     sweep_prices_at_or_below_the_frequency_cut();
