@@ -65,20 +65,23 @@ struct PatternCheck {
     }
 };
 
+// Whether an anchored pattern can match the row codes[start..end).
+inline bool anchored_row(const Dictionary& dict, const uint8_t* codes, size_t start, size_t end,
+                         const PatternPlan& plan) {
+    if (start == end || !plan.runs[0].walk.check_anchored(dict, codes, start, end)) return false;
+    for (size_t i = 1; i < plan.runs.size(); ++i)
+        if (!row_has(dict, codes, start, end, plan.runs[i])) return false;
+    return true;
+}
+
 // Ascending rows the pattern can match.
 template <typename O>
 void pattern_rows(const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len, const Dictionary& dict,
                   const PatternPlan& plan, std::vector<size_t>& out) {
     if (!plan.usable) return;
     if (plan.anchored) {
-        for (size_t row = 0; row + 1 < offsets_len; ++row) {
-            const size_t start = row_offsets[row], end = row_offsets[row + 1];
-            if (start == end) continue;
-            if (!plan.runs[0].walk.check_anchored(dict, codes, start, end)) continue;
-            bool all = true;
-            for (size_t i = 1; i < plan.runs.size() && all; ++i) all = row_has(dict, codes, start, end, plan.runs[i]);
-            if (all) out.push_back(row);
-        }
+        for (size_t row = 0; row + 1 < offsets_len; ++row)
+            if (anchored_row(dict, codes, row_offsets[row], row_offsets[row + 1], plan)) out.push_back(row);
         return;
     }
     const Analysis& driver = plan.runs[plan.driver];
