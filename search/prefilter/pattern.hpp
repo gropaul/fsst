@@ -89,4 +89,22 @@ void pattern_rows(const uint8_t* codes, size_t len, const O* row_offsets, size_t
                   driver.total_frequency, PatternCheck{plan, dict, codes}, out);
 }
 
+// pattern_rows restricted to the `count` ascending rows in `selection`.
+template <typename O>
+void pattern_rows(const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len, const Dictionary& dict,
+                  const PatternPlan& plan, Finder& finder, const uint32_t* selection, size_t count,
+                  std::vector<size_t>& out) {
+    if (!plan.usable) return;
+    if (plan.anchored) {
+        for (size_t k = 0; k < count; ++k) {
+            const size_t row = selection[k];
+            if (anchored_row(dict, codes, row_offsets[row], row_offsets[row + 1], plan)) out.push_back(row);
+        }
+        return;
+    }
+    const Analysis& driver = plan.runs[plan.driver];
+    finder.find(codes, len, row_offsets, offsets_len, driver.cover, driver.covered_frequency, driver.total_frequency,
+                PatternCheck{plan, dict, codes}, selection, count, out);
+}
+
 }  // namespace fsst::search::prefilter

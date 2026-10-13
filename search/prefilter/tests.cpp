@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "fsst.h"
+#include "pattern.hpp"
 #include "prefilter.hpp"
 #include "scan/tests.hpp"
 
@@ -533,6 +534,43 @@ static void selected_scan_is_the_full_scan_filtered() {
     }
 }
 
+// Patterns of several runs, anchored and not, through one Finder: the selected
+// rows are the full pattern_rows filtered to the selection.
+static void selected_pattern_is_the_full_pattern_filtered() {
+    Rng rng{6};
+    Column col = compress_rows(url_rows(3000, rng));
+    const uint32_t n = static_cast<uint32_t>(col.row_count());
+    std::vector<std::vector<uint32_t>> selections = {{}, {0}, {n - 1}};
+    std::vector<uint32_t> all, step7, sparse;
+    for (uint32_t r = 0; r < n; ++r) {
+        all.push_back(r);
+        if (r % 7 == 0) step7.push_back(r);
+        if (r * 2654435761u % 97 < 3) sparse.push_back(r);
+    }
+    selections.insert(selections.end(), {all, step7, sparse});
+    struct Pat {
+        std::vector<std::string> runs;
+        bool start;
+    };
+    Finder finder(n);
+    for (const Pat& pat : {Pat{{"example", "user"}, false}, Pat{{"page", "q="}, false}, Pat{{"https://", "item"}, true},
+                           Pat{{"shop", "zzzzqq"}, false}}) {
+        PatternPlan plan = plan_pattern(col.dict, col.freq, pat.runs, pat.start, false, col.row_count());
+        CHECK(plan.usable);
+        std::vector<size_t> full;
+        pattern_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, plan, full);
+        for (const auto& sel : selections) {
+            std::vector<size_t> want, got;
+            for (size_t r : full)
+                if (std::binary_search(sel.begin(), sel.end(), static_cast<uint32_t>(r))) want.push_back(r);
+            pattern_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, plan,
+                         finder, sel.data(), sel.size(), got);
+            CHECK_MSG(got == want, "%s, %zu selected: %zu rows against %zu", pat.runs[0].c_str(), sel.size(),
+                      got.size(), want.size());
+        }
+    }
+}
+
 int main() {
     shared_suffix_beats_two_local_choices();
     disjoint_paths_are_cut_separately();
@@ -547,5 +585,6 @@ int main() {
     false_zero_frequencies_cannot_hide_a_true_match();
     sweep_prices_at_or_below_the_frequency_cut();
     selected_scan_is_the_full_scan_filtered();
+    selected_pattern_is_the_full_pattern_filtered();
     return finish("prefilter tests");
 }

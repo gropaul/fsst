@@ -60,10 +60,7 @@ class Finder {
     explicit Finder(size_t num_rows) : layer_(2 * num_rows + 2, 0) {}
 
     // candidate_rows restricted to the `count` ascending row indices in
-    // `selection`. The scan reads [0, start, end, start, end, ..., len] over
-    // the selected rows in place of the row offsets, so a hit in an even gap
-    // row is never walked. Below 2.2% x (codes per row)^0.72 of the rows
-    // selected, only blocks from a selected row on are scanned.
+    // `selection`.
     template <typename O>
     void find(const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len, const Dictionary& dict,
               const Analysis& analysis, const uint32_t* selection, size_t count, std::vector<size_t>& out) {
@@ -71,6 +68,21 @@ class Finder {
             out.insert(out.end(), selection, selection + count);
             return;
         }
+        find(codes, len, row_offsets, offsets_len, analysis.cover, analysis.covered_frequency,
+             analysis.total_frequency, scan::WalkCheck{analysis.walk, dict, codes}, selection, count, out);
+    }
+
+    // The scan of `cover` under any check, restricted to the selection: a
+    // merged cover checked by several walks, or a pattern's driver run checked
+    // with its other runs. The scan reads [0, start, end, start, end, ..., len]
+    // over the selected rows in place of the row offsets, so a hit in an even
+    // gap row is never checked. Below 2.2% x (codes per row)^0.72 of the rows
+    // selected, only blocks from a selected row on are scanned.
+    template <typename O, typename Check>
+    void find(const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len, const ProbeCover& cover,
+              size_t covered_frequency, size_t total_frequency, const Check& check, const uint32_t* selection,
+              size_t count, std::vector<size_t>& out) {
+        if (layer_.size() < 2 * count + 2) layer_.resize(2 * count + 2);
         const size_t n = 2 * count + 2;
         for (size_t k = 0; k < count; ++k) {
             layer_[2 * k + 1] = static_cast<uint32_t>(row_offsets[selection[k]]);
@@ -80,8 +92,8 @@ class Finder {
         const double rows = offsets_len > 1 ? double(offsets_len - 1) : 1.0;
         const bool streamed = double(count) < 0.022 * std::pow(double(len) / rows, 0.72) * rows;
         const size_t first = out.size();
-        scan::execute(analysis.cover, codes, len, layer_.data(), n, analysis.covered_frequency,
-                      analysis.total_frequency, scan::OddWalkCheck{analysis.walk, dict, codes, streamed}, out);
+        scan::execute(cover, codes, len, layer_.data(), n, covered_frequency, total_frequency,
+                      scan::OddRows<Check>{check, streamed}, out);
         for (size_t i = first; i < out.size(); ++i) out[i] = selection[(out[i] - 1) / 2];
     }
 
