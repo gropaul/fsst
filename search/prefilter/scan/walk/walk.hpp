@@ -309,11 +309,10 @@ struct WalkCheck {
     }
 };
 
-// A check on the odd rows of an interleaved selection layer only, the
+// The walk on the odd rows of an interleaved selection layer only, the
 // selected rows; `streamed` scans only blocks from a selected row on.
-template <typename C>
 struct OddRows {
-    const C& check;
+    WalkCheck check;
     bool streamed;
 
     bool passes(const size_t hit_index, const size_t row, const size_t row_start_index,

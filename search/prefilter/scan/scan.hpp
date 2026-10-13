@@ -26,7 +26,7 @@ using Mask = Bits<BLOCK / 64>;
 // Mask words per block of a streamed selection, whose rows are short spans.
 constexpr size_t SELECTED_WORDS = 1;
 
-// A check over an interleaved selection layer (OddWalkCheck): it is told the
+// A check over an interleaved selection layer (OddRows): it is told the
 // row, and `streamed` places the blocks at the selected rows.
 template <typename C, typename = void>
 struct on_layer : std::false_type {};
