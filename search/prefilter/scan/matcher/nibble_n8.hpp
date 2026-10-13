@@ -53,7 +53,8 @@ class NibbleN8 {
         for (CodeRange r : cover.ranges) ranges_.push_back(hold(r));
     }
 
-    bool check(const uint8_t* codes, Mask& bits) const {
+    template <size_t W>
+    bool check(const uint8_t* codes, Bits<W>& bits) const {
         return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](V v, const uint8_t*) {
             return check_ranges(probe(batches_, v), ranges_, v);
         });

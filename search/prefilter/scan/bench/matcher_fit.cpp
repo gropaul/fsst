@@ -161,7 +161,7 @@ static Timed time_kernel(const Probe& probe, const Stream& s) {
     M matcher(cover);
     Mask bits{};
     double seconds = best([&] {
-        blocks(s.codes, s.len, [&](const uint8_t* block, size_t, size_t) {
+        blocks<BLOCK / 64>(s.codes, s.len, [&](const uint8_t* block, size_t, size_t) {
             matcher.check(block, bits);
             // The mask is thrown away; keep the compiler from throwing away the kernel with it.
             asm volatile("" : : "r"(bits.data()) : "memory");

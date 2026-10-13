@@ -13,7 +13,8 @@ namespace fsst::search::prefilter::scan::resolver {
 constexpr size_t NONE = static_cast<size_t>(-1);
 
 // The set bit at or after `from`, NONE if the block holds none past it.
-inline size_t next_set(const Mask& bits, size_t from) {
+template <size_t W>
+size_t next_set(const Bits<W>& bits, size_t from) {
     size_t word = from / 64;
     if (word >= bits.size()) return NONE;
     uint64_t set = bits[word] & (~uint64_t{0} << (from % 64));
@@ -33,8 +34,8 @@ class Cursor {
         : row_offsets_(row_offsets), offsets_len_(offsets_len) {}
 
     // find(row_offsets, offsets_len, from_row, code) is the row holding `code`.
-    template <typename Check, typename Find>
-    void rows(const Mask& bits, size_t first_code, const Check& check,
+    template <size_t W, typename Check, typename Find>
+    void rows(const Bits<W>& bits, size_t first_code, const Check& check,
               std::vector<size_t>& out, Find find) {
         size_t at = resolved_code_ > first_code ? resolved_code_ - first_code : 0;
         for (size_t hit; (hit = next_set(bits, at)) != NONE;) {
@@ -43,7 +44,12 @@ class Cursor {
                 row_ = find(row_offsets_, offsets_len_, row_, code);
                 row_end_ = static_cast<size_t>(row_offsets_[row_ + 1]);
             }
-            if (check.passes(code, static_cast<size_t>(row_offsets_[row_]), row_end_)) {
+            bool pass;
+            if constexpr (on_layer<Check>::value)
+                pass = check.passes(code, row_, static_cast<size_t>(row_offsets_[row_]), row_end_);
+            else
+                pass = check.passes(code, static_cast<size_t>(row_offsets_[row_]), row_end_);
+            if (pass) {
                 out.push_back(row_);
                 resolved_code_ = row_end_;
                 at = row_end_ - first_code;

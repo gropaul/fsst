@@ -22,7 +22,8 @@ class EqOr {
 
     // The pair path is chosen once per block, so a cover without pairs runs
     // the token loop alone.
-    bool check(const uint8_t* codes, Mask& bits) const {
+    template <size_t W>
+    bool check(const uint8_t* codes, Bits<W>& bits) const {
         if (pairs_.empty())
             return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](V v, const uint8_t*) {
                 return check_ranges(token_hits(v), ranges_, v);

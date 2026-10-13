@@ -108,7 +108,7 @@ static std::vector<std::pair<std::string, std::vector<uint32_t>>> layers() {
 static void agree_on_every_density() {
     for (auto& [name, offsets] : layers()) {
         every_resolver(name + " empty", std::vector<uint64_t>(CODES / 64 + 1, 0), offsets);
-        for (size_t stride : {1, 2, 3, 7, 64, 65, 1000, 4095, 4096, 4097})
+        for (size_t stride : {size_t{1}, size_t{2}, size_t{3}, size_t{7}, size_t{64}, size_t{65}, size_t{1000}, BLOCK - 1, BLOCK, BLOCK + 1})
             every_resolver(name + " stride " + std::to_string(stride), strided(stride), offsets);
         for (unsigned one_in : {1u, 2u, 10u, 100u, 3000u})
             every_resolver(name + " random 1/" + std::to_string(one_in), random_mask(one_in, one_in),

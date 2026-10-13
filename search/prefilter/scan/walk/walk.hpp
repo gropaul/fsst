@@ -309,6 +309,20 @@ struct WalkCheck {
     }
 };
 
+// The walk on the odd rows of an interleaved selection layer only, the
+// selected rows; `streamed` scans only blocks from a selected row on.
+struct OddWalkCheck {
+    const Walk& walk;
+    const Dictionary& dict;
+    const uint8_t* codes;
+    bool streamed;
+
+    bool passes(const size_t hit_index, const size_t row, const size_t row_start_index,
+                const size_t row_end_index) const {
+        return row % 2 == 1 && walk.check(dict, codes, row_start_index, row_end_index, hit_index);
+    }
+};
+
 // The same, counting the rows the mask named before the walk decided them.
 // For instrumented callers; the plain WalkCheck does no bookkeeping.
 struct CountingWalkCheck {

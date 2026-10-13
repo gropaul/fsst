@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
-#include <deque>
 #include <vector>
 
 #include "graph.hpp"
@@ -65,15 +64,14 @@ class Dinic {
         std::fill(level_.begin(), level_.end(), -1);
         level_[source] = 0;
         queue_.clear();
-        queue_.push_back(source);
-        while (!queue_.empty()) {
-            size_t v = queue_.front();
-            queue_.pop_front();
+        queue_.push_back(static_cast<uint32_t>(source));
+        for (size_t head = 0; head < queue_.size(); ++head) {
+            size_t v = queue_[head];
             for (uint32_t arc = head_[v]; arc < head_[v + 1]; ++arc) {
                 size_t to = to_[arc];
                 if (cap_[arc] > 0 && level_[to] < 0) {
                     level_[to] = level_[v] + 1;
-                    queue_.push_back(to);
+                    queue_.push_back(static_cast<uint32_t>(to));
                 }
             }
         }
@@ -126,7 +124,7 @@ class Dinic {
     std::vector<uint32_t> head_, to_, twin_, forward_, next_, path_;
     std::vector<uint64_t> cap_;
     std::vector<int32_t> level_;
-    std::deque<size_t> queue_;
+    std::vector<uint32_t> queue_;  // the BFS queue, read from the front by index
 };
 
 }  // namespace detail

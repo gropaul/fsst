@@ -43,3 +43,8 @@ target_compile_definitions(prefilter_matcher_sweep PRIVATE BENCH_DIR="${BENCH_DI
 add_executable(prefilter_resolver_sweep prefilter/scan/bench/resolver_fit.cpp)
 target_link_libraries(prefilter_resolver_sweep fsst_search)
 target_compile_definitions(prefilter_resolver_sweep PRIVATE BENCH_DIR="${BENCH_DIR}")
+
+# Paper tooling (tools/): logs the alignment graph and min cut per needle.
+add_executable(plan_log tools/plan_log.cpp)
+target_link_libraries(plan_log fsst_search fsst)
+target_include_directories(plan_log PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})

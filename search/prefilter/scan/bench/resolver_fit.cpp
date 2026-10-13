@@ -83,7 +83,7 @@ static std::vector<uint64_t> mask_of(const NeedleSet& set, const uint8_t* codes,
     for (uint8_t c : set.needles) admits[c] = true;
     std::vector<uint64_t> mask;
     mask.reserve(len / 64);
-    blocks(codes, len, [&](const uint8_t* block, size_t, size_t valid) {
+    blocks<BLOCK / 64>(codes, len, [&](const uint8_t* block, size_t, size_t valid) {
         Mask bits{};
         for (size_t at = 0; at < BLOCK; ++at)
             if (admits[block[at]]) bits[at / 64] |= uint64_t{1} << (at % 64);

@@ -21,6 +21,7 @@ struct Planned {
     uint32_t covered;  // codes the cover matches in the indexed stream
     double scan_ns;
     scan::Walk walk;
+    std::vector<uint32_t> cut;  // the chosen cut, as indices into the cut graph's edges (search/tools/trace.hpp)
 };
 
 inline uint64_t weight_at(const Edge& e, uint64_t lambda) {
@@ -34,14 +35,15 @@ inline Planned cheapest_cover(const CutGraph& graph, const Frequency& freq, scan
     MinCut solver(graph);
     Planned best{};
     bool priced = false;
+    std::vector<const Edge*> edges;  // one buffer for every cut priced
     auto price = [&](const std::vector<uint32_t>& cut) {
-        std::vector<const Edge*> edges;
+        edges.clear();
         for (uint32_t at : cut) edges.push_back(&graph.edges[at]);
         ProbeCover cover = from_edge_cut(edges);
         uint32_t covered = freq.of_cover(cover);
         double ns = scan::policy::scan_ns(cover, covered, region);
         if (!priced || ns < best.scan_ns) {
-            best = Planned{std::move(cover), covered, ns, {}};
+            best = Planned{std::move(cover), covered, ns, {}, cut};
             priced = true;
         }
     };

@@ -35,7 +35,8 @@ class Range {
         for (size_t i = 1; i < cover.ranges.size(); ++i) rest_.push_back(hold(cover.ranges[i]));
     }
 
-    bool check(const uint8_t* codes, Mask& bits) const {
+    template <size_t W>
+    bool check(const uint8_t* codes, Bits<W>& bits) const {
         return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](V v, const uint8_t*) {
             return check_ranges(inside(first_, v), rest_, v);
         });

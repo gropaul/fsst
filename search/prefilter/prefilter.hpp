@@ -4,6 +4,7 @@
 // and its walk, then run the cover over a code stream, exact through the
 // walk or as the superset of rows holding a covered code.
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -50,6 +51,43 @@ inline void candidate_rows(const uint8_t* codes, size_t len, const uint32_t* row
     scan::execute(analysis.cover, codes, len, row_offsets, offsets_len, analysis.covered_frequency,
                   analysis.total_frequency, scan::WalkCheck{analysis.walk, dict, codes}, out);
 }
+
+// Scans of one row group restricted to a selection of its rows, keeping their
+// scratch across queries.
+class Finder {
+   public:
+    // Room for selections of up to `num_rows` rows.
+    explicit Finder(size_t num_rows) : layer_(2 * num_rows + 2, 0) {}
+
+    // candidate_rows restricted to the `count` ascending row indices in
+    // `selection`. The scan reads [0, start, end, start, end, ..., len] over
+    // the selected rows in place of the row offsets, so a hit in an even gap
+    // row is never walked. Below 2.2% x (codes per row)^0.72 of the rows
+    // selected, only blocks from a selected row on are scanned.
+    template <typename O>
+    void find(const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len, const Dictionary& dict,
+              const Analysis& analysis, const uint32_t* selection, size_t count, std::vector<size_t>& out) {
+        if (analysis.matches_all) {
+            out.insert(out.end(), selection, selection + count);
+            return;
+        }
+        const size_t n = 2 * count + 2;
+        for (size_t k = 0; k < count; ++k) {
+            layer_[2 * k + 1] = static_cast<uint32_t>(row_offsets[selection[k]]);
+            layer_[2 * k + 2] = static_cast<uint32_t>(row_offsets[selection[k] + 1]);
+        }
+        layer_[n - 1] = static_cast<uint32_t>(len);
+        const double rows = offsets_len > 1 ? double(offsets_len - 1) : 1.0;
+        const bool streamed = double(count) < 0.022 * std::pow(double(len) / rows, 0.72) * rows;
+        const size_t first = out.size();
+        scan::execute(analysis.cover, codes, len, layer_.data(), n, analysis.covered_frequency,
+                      analysis.total_frequency, scan::OddWalkCheck{analysis.walk, dict, codes, streamed}, out);
+        for (size_t i = first; i < out.size(); ++i) out[i] = selection[(out[i] - 1) / 2];
+    }
+
+   private:
+    std::vector<uint32_t> layer_;
+};
 
 namespace detail {
 

@@ -16,8 +16,8 @@ class GallopSeek {
 
     GallopSeek(const O* row_offsets, size_t offsets_len) : cursor_(row_offsets, offsets_len) {}
 
-    template <typename Check>
-    void rows(const Mask& bits, size_t first_code, const Check& check, std::vector<size_t>& out) {
+    template <size_t W, typename Check>
+    void rows(const Bits<W>& bits, size_t first_code, const Check& check, std::vector<size_t>& out) {
         cursor_.rows(bits, first_code, check, out, gallop);
     }
 

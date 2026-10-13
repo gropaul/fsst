@@ -502,6 +502,37 @@ static void deep_chain_does_not_exhaust_the_stack() {
     CHECK(steps(min_cut(g, by_frequency)) == Steps({{len / 2, len / 2 + 1}}));
 }
 
+// One Finder for every call, so the layer is reused with stale entries.
+static void selected_scan_is_the_full_scan_filtered() {
+    Rng rng{5};
+    Column col = compress_rows(url_rows(3000, rng));
+    const uint32_t n = static_cast<uint32_t>(col.row_count());
+    std::vector<std::vector<uint32_t>> selections = {{}, {0}, {n - 1}};
+    std::vector<uint32_t> all, step7, runs, sparse;
+    for (uint32_t r = 0; r < n; ++r) {
+        all.push_back(r);
+        if (r % 7 == 0) step7.push_back(r);
+        if ((r / 40) % 3 == 0) runs.push_back(r);
+        if (r * 2654435761u % 97 < 3) sparse.push_back(r);
+    }
+    selections.insert(selections.end(), {all, step7, runs, sparse});
+    Finder finder(n);
+    for (std::string pat : {"example", ".com", "://", "page", "user", "", "zzzzqq"}) {
+        Analysis a = analyze(bytes(pat), pat.size(), col.dict, col.freq, col.row_count());
+        std::vector<size_t> full;
+        candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, full);
+        for (const auto& sel : selections) {
+            std::vector<size_t> want, got;
+            for (size_t r : full)
+                if (std::binary_search(sel.begin(), sel.end(), static_cast<uint32_t>(r))) want.push_back(r);
+            finder.find(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a,
+                        sel.data(), sel.size(), got);
+            CHECK_MSG(got == want, "%s, %zu selected: %zu rows against %zu", pat.c_str(), sel.size(), got.size(),
+                      want.size());
+        }
+    }
+}
+
 int main() {
     shared_suffix_beats_two_local_choices();
     disjoint_paths_are_cut_separately();
@@ -515,5 +546,6 @@ int main() {
     empty_probe_cover_appends_nothing();
     false_zero_frequencies_cannot_hide_a_true_match();
     sweep_prices_at_or_below_the_frequency_cut();
+    selected_scan_is_the_full_scan_filtered();
     return finish("prefilter tests");
 }

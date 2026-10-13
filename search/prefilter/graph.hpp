@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <cstring>
 #include <vector>
 
 #include "cover.hpp"
@@ -86,8 +85,13 @@ struct CutGraph {
     size_t node_count;
     uint32_t source;
     uint32_t sink;
+    std::vector<uint32_t> origin;  // per edge, the alignment edge it was copied from (search/tools/trace.hpp)
 
-    static CutGraph plain(const AlignmentGraph& g) { return CutGraph{g.edges, g.node_count(), g.source(), g.sink()}; }
+    static CutGraph plain(const AlignmentGraph& g) {
+        CutGraph cg{g.edges, g.node_count(), g.source(), g.sink(), {}};
+        for (uint32_t at = 0; at < g.edges.size(); ++at) cg.origin.push_back(at);
+        return cg;
+    }
 
     // Every node except source and sink is copied once per edge entering it,
     // so a copy knows the symbol that led to it. A Point edge b, or a
@@ -96,29 +100,32 @@ struct CutGraph {
     // through them is blocked by either, and the cut takes the cheaper.
     // Paths are otherwise those of g, so every cut is still a sound cover.
     static CutGraph with_pairs(const AlignmentGraph& g, const Frequency& freq) {
-        const size_t needle_len = g.needle_len;
-        std::vector<std::vector<size_t>> into(needle_len + 1);
-        for (size_t at = 0; at < g.edges.size(); ++at) into[g.edges[at].to].push_back(at);
-        std::vector<std::vector<uint32_t>> copy_id(needle_len + 1);  // per node, one copy per edge into it
-        uint32_t next = 1;
-        for (size_t v = 1; v < needle_len; ++v)
-            for (size_t j = 0; j < into[v].size(); ++j) copy_id[v].push_back(next++);
+        const size_t needle_len = g.needle_len, edge_count = g.edges.size();
+        // The edges into node v, in edge order, are into[start[v] .. start[v + 1]);
+        // the copy of node v entered by into[s] is node 1 + s - start[1].
+        std::vector<uint32_t> start(needle_len + 2, 0), into(edge_count), slot(edge_count), fill(needle_len + 1);
+        for (const Edge& e : g.edges) ++start[e.to + 1];
+        for (size_t v = 0; v <= needle_len; ++v) start[v + 1] += start[v];
+        std::copy(start.begin(), start.begin() + static_cast<std::ptrdiff_t>(needle_len + 1), fill.begin());
+        size_t copies = 0;
+        for (uint32_t at = 0; at < edge_count; ++at) {
+            slot[at] = fill[g.edges[at].to]++;
+            into[slot[at]] = at;
+            copies += g.edges[at].from == 0 ? 1 : start[g.edges[at].from + 1] - start[g.edges[at].from];
+        }
+        auto copy_of = [&](uint32_t s) { return 1 + s - start[1]; };
+        uint32_t next = copy_of(start[needle_len]);
         const uint32_t sink = next++;
-        CutGraph cg{{}, 0, 0, sink};
-        for (size_t at = 0; at < g.edges.size(); ++at) {
+        CutGraph cg{{}, 0, 0, sink, {}};
+        cg.edges.reserve(2 * copies);
+        cg.origin.reserve(2 * copies);
+        for (uint32_t at = 0; at < edge_count; ++at) {
             const Edge& e = g.edges[at];
-            uint32_t target = sink;
-            if (e.to != needle_len) {
-                size_t j = std::find(into[e.to].begin(), into[e.to].end(), at) - into[e.to].begin();
-                target = copy_id[e.to][j];
-            }
-            std::vector<std::pair<uint32_t, const Edge*>> copies;
-            if (e.from == 0)
-                copies.push_back({0u, nullptr});
-            else
-                for (size_t j = 0; j < into[e.from].size(); ++j)
-                    copies.push_back({copy_id[e.from][j], &g.edges[into[e.from][j]]});
-            for (auto [cu, entered_by] : copies) {
+            const uint32_t target = e.to != needle_len ? copy_of(slot[at]) : sink;
+            const uint32_t first = e.from == 0 ? 0 : start[e.from], last = e.from == 0 ? 1 : start[e.from + 1];
+            for (uint32_t s = first; s < last; ++s) {
+                const uint32_t cu = e.from == 0 ? 0 : copy_of(s);
+                const Edge* entered_by = e.from == 0 ? nullptr : &g.edges[into[s]];
                 bool one_symbol = e.probe == Probe::Point || (e.probe == Probe::Range && e.range.begin == e.range.last);
                 bool pairable = one_symbol && entered_by != nullptr && entered_by->probe == Probe::Point;
                 if (!pairable) {
@@ -126,6 +133,7 @@ struct CutGraph {
                     copy.from = cu;
                     copy.to = target;
                     cg.edges.push_back(std::move(copy));
+                    cg.origin.push_back(at);
                     continue;
                 }
                 uint32_t mid = next++;
@@ -136,6 +144,8 @@ struct CutGraph {
                 CodePair pair{entered_by->codes[0], e.probe == Probe::Point ? e.codes[0] : e.range.begin};
                 cg.edges.push_back(Edge{mid, target, Probe::Pair, 0, {}, CodeRange{0, 0}, pair, freq.pair_estimate(pair),
                                         0, 0, 1});
+                cg.origin.push_back(at);
+                cg.origin.push_back(at);
             }
         }
         cg.node_count = next;
@@ -167,22 +177,24 @@ inline Candidates alignment_candidates(const Dictionary& dict, const uint8_t* ne
                                        Anchor anchor = Anchor::None) {
     Candidates c;
     size_t alignment_count = std::min(needle_len, MAX_TOKEN_SIZE);
+    const uint64_t key = load_word(needle, needle_len);
     for (size_t code = 0; code < dict.count; ++code) {
-        const uint8_t* s = dict.symbol(code);
+        const uint64_t w = dict.word(code);
         size_t len = dict.length(code);
+        // The symbol's last alignment_index bytes against needle[..alignment_index].
         for (size_t alignment_index = 1; alignment_index < alignment_count && alignment_index < len; ++alignment_index)
-            if (std::memcmp(s + len - alignment_index, needle, alignment_index) == 0)
+            if ((((w >> (8 * (len - alignment_index))) ^ key) & low_bytes(alignment_index)) == 0)
                 c.record(alignment_index, static_cast<uint8_t>(code));
         if (anchor == Anchor::End) {
             // the row's last symbol, so it holds the needle as its tail
-            if (len > needle_len && std::memcmp(s + len - needle_len, needle, needle_len) == 0)
+            if (len > needle_len && (((w >> (8 * (len - needle_len))) ^ key) & low_bytes(needle_len)) == 0)
                 c.contained.push_back(static_cast<uint8_t>(code));
             continue;
         }
         // A symbol starting with the needle is the terminal set's at offset 0.
-        if (len >= needle_len && std::memcmp(s, needle, needle_len) == 0) continue;
+        if (len >= needle_len && ((w ^ key) & low_bytes(needle_len)) == 0) continue;
         for (size_t p = 1; p + needle_len <= len; ++p)
-            if (std::memcmp(s + p, needle, needle_len) == 0) {
+            if ((((w >> (8 * p)) ^ key) & low_bytes(needle_len)) == 0) {
                 c.contained.push_back(static_cast<uint8_t>(code));
                 break;
             }
@@ -202,11 +214,17 @@ struct Builder {
     std::vector<bool> built;
 
     void add(uint32_t from, uint32_t to, Probe probe, std::vector<uint8_t> codes, uint8_t byte = 0) {
-        std::vector<CodeRange> runs;
-        for (uint8_t c : codes) runs.push_back({c, c});
-        ProbeCover shape = ProbeCover::from_runs(runs);
-        Edge e{from, to, probe, byte, std::move(codes), CodeRange{0, 0}, CodePair{0, 0}, 0,
-               static_cast<uint32_t>(shape.points.size()), static_cast<uint32_t>(shape.ranges.size()), 0};
+        // The points and ranges ProbeCover::from_runs would merge the codes into,
+        // counted in place: a run is codes each at most one past the one before.
+        assert(std::is_sorted(codes.begin(), codes.end()));
+        uint32_t points = 0, ranges = 0;
+        for (size_t i = 0; i < codes.size();) {
+            size_t j = i + 1;
+            while (j < codes.size() && codes[j] <= codes[j - 1] + 1) ++j;
+            ++(codes[j - 1] == codes[i] ? points : ranges);
+            i = j;
+        }
+        Edge e{from, to, probe, byte, std::move(codes), CodeRange{0, 0}, CodePair{0, 0}, 0, points, ranges, 0};
         e.frequency = freq.of_codes(e.codes);
         edges.push_back(std::move(e));
     }
@@ -226,16 +244,14 @@ struct Builder {
     // bytes have distinct three-byte prefixes, so at most one can match and
     // the encoder takes it before any shorter one.
     bool greedy(size_t offset, uint8_t& code, size_t& len) const {
-        size_t tail_len = needle_len - offset;
-        len = 0;
-        for (size_t c = 0; c < dict.count; ++c) {
-            size_t l = dict.length(c);
-            if (l > len && l <= tail_len && std::memcmp(dict.symbol(c), needle + offset, l) == 0) {
+        for (len = std::min(needle_len - offset, MAX_TOKEN_SIZE); len > 0; --len) {
+            size_t c = dict.find(needle + offset, len);
+            if (c < dict.count) {
                 code = static_cast<uint8_t>(c);
-                len = l;
+                return true;
             }
         }
-        return len > 0;
+        return false;
     }
 
     // The steps out of offset; returns where the parse lands. No symbol
@@ -280,6 +296,7 @@ inline AlignmentGraph build_alignment_graph(const Dictionary& dict, const uint8_
     assert(needle_len > 0);
     assert(dict.sorted());
     detail::Builder b{dict, needle, needle_len, anchor, freq, {}, std::vector<bool>(needle_len, false)};
+    b.edges.reserve(2 * needle_len + 16);
     if (anchor == Anchor::Start) {
         // a prefix begins at the row's first byte: the greedy chain from offset 0 is its only layout
         b.ensure_chain(0);

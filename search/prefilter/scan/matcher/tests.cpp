@@ -72,7 +72,7 @@ static Block block(uint64_t seed) {
 static std::vector<uint8_t> distinct_codes(const Block& b, size_t count) {
     std::vector<uint8_t> out;
     std::set<uint8_t> seen;
-    for (size_t i = 0; out.size() < count && i < BLOCK; i += 37)
+    for (size_t i = 0; out.size() < count && i < BLOCK; ++i)
         if (seen.insert(b[i]).second) out.push_back(b[i]);
     return out;
 }
