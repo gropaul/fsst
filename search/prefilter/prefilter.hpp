@@ -4,7 +4,6 @@
 // and its walk, then run the cover over a code stream, exact through the
 // walk or as the superset of rows holding a covered code.
 
-#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -13,116 +12,94 @@
 
 namespace fsst::search::prefilter {
 
-// One node per needle offset plus the sink, inside the walk's u16 ids.
-constexpr size_t MAX_PATTERN_LEN = 65535;
-
 struct Analysis {
     ProbeCover cover;  // empty when anchored: the row loop needs no cover
     uint32_t covered_frequency;
     uint32_t total_frequency;
-    double scan_ns;
     scan::Walk walk;
     bool matches_all;  // the empty pattern: every row, no scan
 };
 
 inline Analysis analyze(const uint8_t* pattern, size_t n, const Dictionary& dict, const Frequency& freq,
                         size_t row_count, Anchor anchor = Anchor::None) {
-    if (n == 0) return Analysis{ProbeCover{}, 0, freq.total, 0.0, {}, true};
-    assert(n <= MAX_PATTERN_LEN);
+    if (n == 0) return Analysis{ProbeCover{}, 0, freq.total, {}, true};
     if (anchor != Anchor::None) {
         // one layout, so nothing to cut and no cover to price: the walk alone decides, per row
         AlignmentGraph graph = build_alignment_graph(dict, pattern, n, freq, anchor);
-        return Analysis{ProbeCover{}, 0, freq.total, 0.0, scan::Walk(graph, pattern), false};
+        return Analysis{ProbeCover{}, 0, freq.total, scan::Walk(graph, pattern), false};
     }
     Planned p = plan(dict, pattern, n, freq, row_count);
-    return Analysis{std::move(p.cover), p.covered, freq.total, p.scan_ns, std::move(p.walk), false};
+    return Analysis{std::move(p.cover), p.covered, freq.total, std::move(p.walk), false};
 }
 
-inline void all_rows(size_t offsets_len, std::vector<size_t>& out) {
-    for (size_t row = 0; row + 1 < offsets_len; ++row) out.push_back(row);
+// The analysis's planned scan over `s`, each hit decided by `check`. A
+// non-empty pattern with an empty cover appends nothing; the empty pattern
+// appends every row without a scan.
+template <typename Check>
+void execute(const Analysis& analysis, const scan::Stream& s, const Check& check, std::vector<size_t>& out) {
+    if (analysis.matches_all) {
+        for (size_t row = 0; row < s.row_count(); ++row) out.push_back(row);
+        return;
+    }
+    scan::execute(analysis.cover, s, analysis.covered_frequency, analysis.total_frequency, check, out);
 }
 
 // Ascending rows containing the pattern: every hit goes through the walk.
-// `dict` is the table the analysis was built over. A non-empty pattern with
-// an empty cover appends nothing; the empty pattern appends every row.
-inline void candidate_rows(const uint8_t* codes, size_t len, const uint32_t* row_offsets, size_t offsets_len,
-                           const Dictionary& dict, const Analysis& analysis, std::vector<size_t>& out) {
-    if (analysis.matches_all) return all_rows(offsets_len, out);
-    scan::execute(analysis.cover, codes, len, row_offsets, offsets_len, analysis.covered_frequency,
-                  analysis.total_frequency, scan::WalkCheck{analysis.walk, dict, codes}, out);
+// `dict` is the table the analysis was built over.
+inline void candidate_rows(const scan::Stream& s, const Dictionary& dict, const Analysis& analysis,
+                           std::vector<size_t>& out) {
+    execute(analysis, s, scan::WalkCheck{analysis.walk, dict, s.codes}, out);
 }
 
 // Scans of one row group restricted to a selection of its rows, keeping their
 // scratch across queries.
 class Finder {
    public:
-    // Room for selections of up to `num_rows` rows.
-    explicit Finder(size_t num_rows) : layer_(2 * num_rows + 2, 0) {}
-
     // candidate_rows restricted to the `count` ascending row indices in
-    // `selection`. The scan reads [0, start, end, start, end, ..., len] over
-    // the selected rows in place of the row offsets, so a hit in an even gap
-    // row is never checked. Below 2.2% x (codes per row)^0.72 of the rows
-    // selected, only blocks from a selected row on are scanned.
-    template <typename O>
-    void find(const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len, const Dictionary& dict,
-              const Analysis& analysis, const uint32_t* selection, size_t count, std::vector<size_t>& out) {
+    // `selection`. A selected row costs the per-row scan its codes plus one
+    // block of per-row overhead; the full scan costs every code once, and
+    // the rows not selected are dropped afterwards.
+    void find(const scan::Stream& s, const Dictionary& dict, const Analysis& analysis, const uint32_t* selection,
+              size_t count, std::vector<size_t>& out) {
         if (analysis.matches_all) {
             out.insert(out.end(), selection, selection + count);
             return;
         }
-        if (layer_.size() < 2 * count + 2) layer_.resize(2 * count + 2);
-        const size_t n = 2 * count + 2;
-        for (size_t k = 0; k < count; ++k) {
-            layer_[2 * k + 1] = static_cast<uint32_t>(row_offsets[selection[k]]);
-            layer_[2 * k + 2] = static_cast<uint32_t>(row_offsets[selection[k] + 1]);
+        if (count == 0) return;
+        const scan::WalkCheck check{analysis.walk, dict, s.codes};
+        const size_t avg_codes = s.len / s.row_count();
+        const size_t per_row_cost = count * (avg_codes + scan::ROW_BLOCK);
+        if (per_row_cost < s.len) {
+            scan::execute_selected(analysis.cover, s, analysis.covered_frequency, analysis.total_frequency, selection,
+                                   count, check, out);
+            return;
         }
-        layer_[n - 1] = static_cast<uint32_t>(len);
-        const double rows = offsets_len > 1 ? double(offsets_len - 1) : 1.0;
-        const bool streamed = double(count) < 0.022 * std::pow(double(len) / rows, 0.72) * rows;
         const size_t first = out.size();
-        scan::execute(analysis.cover, codes, len, layer_.data(), n, analysis.covered_frequency,
-                      analysis.total_frequency,
-                      scan::OddRows{{analysis.walk, dict, codes}, streamed}, out);
-        for (size_t i = first; i < out.size(); ++i) out[i] = selection[(out[i] - 1) / 2];
+        scan::execute(analysis.cover, s, analysis.covered_frequency, analysis.total_frequency, check, out);
+        keep_selected(s.row_count(), selection, count, out, first);
     }
 
    private:
-    std::vector<uint32_t> layer_;
+    // Drops from out[first..] the rows `selection` does not hold, in place and
+    // without branches: every row is written back, the write position
+    // advancing only past a selected one.
+    void keep_selected(size_t num_rows, const uint32_t* selection, size_t count, std::vector<size_t>& out,
+                       size_t first) {
+        selected_.assign(num_rows, 0);
+        uint8_t* selected = selected_.data();
+        for (size_t k = 0; k < count; ++k) selected[selection[k]] = 1;
+        size_t* rows = out.data();
+        size_t kept = first;
+        for (size_t i = first; i < out.size(); ++i) {
+            const size_t row = rows[i];
+            rows[kept] = row;
+            kept += selected[row];
+        }
+        out.resize(kept);
+    }
+
+    // One byte per row of the row group, 1 where the selection holds the row.
+    std::vector<uint8_t> selected_;
 };
-
-namespace detail {
-
-template <Anchor A>
-size_t anchored_rows(const uint8_t* codes, const int32_t* row_starts, const uint32_t* row_lengths,
-                     const uint32_t* sel, size_t count, const Dictionary& dict, const scan::Walk& walk, uint32_t* out) {
-    size_t out_count = 0;
-    for (size_t index = 0; index < count; ++index) {
-        const uint32_t row = sel ? sel[index] : static_cast<uint32_t>(index);
-        const size_t start = static_cast<size_t>(row_starts[row]);
-        const size_t end = start + static_cast<size_t>(row_lengths[row]);
-        const bool match = walk.check_anchored<A>(dict, codes, start, end);
-        out[out_count] = row;
-        out_count += match;
-    }
-    return out_count;
-}
-
-}  // namespace detail
-
-// The rows that start (Anchor::Start) or end (Anchor::End) with the walk's pattern, written to
-// out[0 .. returned count) in the order checked: exact, and without a byte scan, since the anchor names the only
-// position the pattern can sit at. The rows checked are sel[0 .. count), or 0 .. count when sel is null; out must
-// hold count entries and may be sel itself. Each row is read on its own,
-// codes[row_starts[row] .. row_starts[row] + row_lengths[row]), so the rows need not be adjacent or in order;
-// an empty row matches nothing.
-inline size_t anchored_rows(const uint8_t* codes, const int32_t* row_starts, const uint32_t* row_lengths,
-                            const uint32_t* sel, size_t count, const Dictionary& dict, const scan::Walk& walk,
-                            uint32_t* out) {
-    if (walk.anchor() == Anchor::End) {
-        return detail::anchored_rows<Anchor::End>(codes, row_starts, row_lengths, sel, count, dict, walk, out);
-    }
-    return detail::anchored_rows<Anchor::Start>(codes, row_starts, row_lengths, sel, count, dict, walk, out);
-}
 
 }  // namespace fsst::search::prefilter

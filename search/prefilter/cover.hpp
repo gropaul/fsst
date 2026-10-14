@@ -43,16 +43,6 @@ struct ProbeCover {
         return false;
     }
 
-    // Whether the scan sets the bit at i over codes[..end): a covered code,
-    // or the first of a covered pair whose second lies before `end`.
-    bool matches(const uint8_t* codes, size_t i, size_t end) const {
-        if (contains(codes[i])) return true;
-        if (i + 1 >= end) return false;
-        for (CodePair p : pairs)
-            if (codes[i] == p.first && codes[i + 1] == p.second) return true;
-        return false;
-    }
-
     // Merge runs that overlap or abut, then file single-code runs as points
     // and the rest as ranges. Input in any order.
     static ProbeCover from_runs(std::vector<CodeRange> runs) {

@@ -6,67 +6,28 @@
 #include <string>
 #include <vector>
 
-#include "fsst.h"
-#include "prefilter.hpp"
+#include "compress.hpp"
 #include "scan/tests.hpp"
 
 using namespace fsst::search::prefilter;
+using scan::cover_matches;
 
-struct Column {
-    std::vector<uint8_t> codes;
-    std::vector<uint32_t> offsets;
-    Dictionary dict;
-    Frequency freq;
+struct Column : CompressedRows {
     std::vector<std::string> rows;
-
-    size_t row_count() const { return offsets.size() - 1; }
 };
 
-static Column compress_rows(const std::vector<std::string>& rows) {
-    const size_t n = rows.size();
-    std::vector<size_t> len(n);
-    std::vector<const unsigned char*> str(n);
-    size_t raw_bytes = 0;
-    for (size_t i = 0; i < n; ++i) {
-        len[i] = rows[i].size();
-        str[i] = reinterpret_cast<const unsigned char*>(rows[i].data());
-        raw_bytes += len[i];
-    }
-    fsst_encoder_t* encoder = fsst_create(n, len.data(), str.data(), 0);
-    fsst_sort_codes(encoder);
-    std::vector<unsigned char> out(2 * raw_bytes + 8 * n + 8);
-    std::vector<size_t> len_out(n);
-    std::vector<unsigned char*> str_out(n);
-    size_t done = 0;
-    unsigned char* cursor = out.data();
-    while (done < n) {
-        size_t count = fsst_compress(encoder, n - done, len.data() + done, str.data() + done,
-                                     static_cast<size_t>(out.data() + out.size() - cursor), cursor,
-                                     len_out.data() + done, str_out.data() + done);
-        CHECK(count > 0);
-        if (count == 0) break;
-        done += count;
-        cursor = str_out[done - 1] + len_out[done - 1];
-    }
+static Column column(const std::vector<std::string>& rows) {
     Column col;
+    static_cast<CompressedRows&>(col) = ::fsst::search::prefilter::compress_rows(rows);
     col.rows = rows;
-    col.codes.assign(out.data(), cursor);
-    for (size_t i = 0; i < n; ++i) col.offsets.push_back(static_cast<uint32_t>(str_out[i] - out.data()));
-    col.offsets.push_back(static_cast<uint32_t>(col.codes.size()));
-
-    unsigned char header[FSST_MAXHEADER];
-    fsst_export(encoder, header);
-    fsst_decoder_t decoder;
-    fsst_import(&decoder, header);
-    col.dict = Dictionary::from(decoder.symbol, decoder.len, symbol_count(header));
     CHECK(col.dict.sorted());
-    fsst_destroy(encoder);
-    col.freq = Frequency::of(col.codes.data(), col.codes.size());
-
-    std::vector<unsigned char> plain(raw_bytes + 8);
-    for (size_t i = 0; i < n; ++i) {
-        size_t got = fsst_decompress(&decoder, len_out[i], str_out[i], plain.size(), plain.data());
-        CHECK_MSG(got == len[i] && std::memcmp(plain.data(), str[i], got) == 0, "row %zu does not round trip", i);
+    std::vector<unsigned char> plain(8);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        plain.resize(rows[i].size() + 8);
+        const size_t len = col.offsets[i + 1] - col.offsets[i];
+        size_t got = fsst_decompress(&col.decoder, len, col.codes.data() + col.offsets[i], plain.size(), plain.data());
+        CHECK_MSG(got == rows[i].size() && std::memcmp(plain.data(), rows[i].data(), got) == 0,
+                  "row %zu does not round trip", i);
     }
     return col;
 }
@@ -83,6 +44,16 @@ static std::vector<size_t> rows_containing(const Column& col, const std::string&
 }
 
 static const uint8_t* bytes(const std::string& s) { return reinterpret_cast<const uint8_t*>(s.data()); }
+
+static CutGraph plain(const AlignmentGraph& g) { return CutGraph{g.edges, g.node_count(), g.source(), g.sink()}; }
+
+template <typename Weight>
+static std::vector<const Edge*> min_cut(const CutGraph& graph, Weight weight) {
+    MinCut solver(graph);
+    std::vector<const Edge*> cut;
+    for (uint32_t at : solver.solve(graph, weight)) cut.push_back(&graph.edges[at]);
+    return cut;
+}
 
 template <typename Blocked>
 static bool sink_reachable_avoiding(const CutGraph& g, Blocked blocked) {
@@ -112,7 +83,7 @@ static bool selected(const std::vector<const Edge*>& selection, const Edge& e) {
 // across a row boundary and lets the walk reject that.
 static bool row_holds(const Column& col, const ProbeCover& cover, size_t row) {
     for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i)
-        if (cover.matches(col.codes.data(), i, col.offsets[row + 1])) return true;
+        if (cover_matches(cover, col.codes.data(), i, col.offsets[row + 1])) return true;
     return false;
 }
 
@@ -214,7 +185,7 @@ static void check_graph(const Column& col, const std::string& pat, const std::ve
         }
     }
     CHECK_MSG(g.edges.size() <= 2 * needle_len + 16, "%s: %zu edges", pat.c_str(), g.edges.size());
-    check_cut_graph(col, pat, want, CutGraph::plain(g));
+    check_cut_graph(col, pat, want, plain(g));
     CutGraph paired = CutGraph::with_pairs(g, col.freq);
     for (const Edge& e : paired.edges) g_pair_edges += e.probe == Probe::Pair;
     // Unrolling keeps every edge of the plain graph at least once.
@@ -230,7 +201,7 @@ static void check(const Column& col, const std::vector<std::string>& patterns) {
         if (!pat.empty()) check_graph(col, pat, want);
         Analysis a = analyze(bytes(pat), pat.size(), col.dict, col.freq, col.row_count());
         std::vector<size_t> exact;
-        candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, exact);
+        candidate_rows(col.stream(), col.dict, a, exact);
         CHECK_MSG(exact == want, "%s: the walk's rows differ from byte containment (%zu against %zu)", pat.c_str(),
                   exact.size(), want.size());
         if (pat.empty()) {
@@ -242,7 +213,7 @@ static void check(const Column& col, const std::vector<std::string>& patterns) {
         for (size_t row : want) {
             bool holds = false;
             for (size_t i = col.offsets[row]; i < col.offsets[row + 1]; ++i)
-                holds |= a.cover.matches(col.codes.data(), i, col.codes.size());
+                holds |= cover_matches(a.cover, col.codes.data(), i, col.codes.size());
             CHECK_MSG(holds, "%s: matching row %zu holds no covered code or pair", pat.c_str(), row);
         }
     }
@@ -268,7 +239,7 @@ static void sound_on_url_text() {
     std::vector<std::string> rows = url_rows(400, rng);
     rows.push_back("");
     rows.push_back(std::string(300, 'x') + "https://www.example.com/page1" + std::string(20, 'y'));
-    Column col = compress_rows(rows);
+    Column col = column(rows);
     std::vector<std::string> patterns = {"",
                                          "e",
                                          "/",
@@ -292,7 +263,7 @@ static void sound_on_repetitive_text() {
                                      "zzaazz",               "abababababab",      "ba",     "aab",  "baa",
                                      std::string(600, 'a'),  "appappapple",       "apple",  "app",  "papp",
                                      "abcabcabcabc",         "cab",               "bca",    "abcab"};
-    Column col = compress_rows(rows);
+    Column col = column(rows);
     check(col, {"a", "aa", "aaa", "aaaa", "aaaaaaaaa", "ab", "ba", "aba", "bab", "zz", "za", "app", "apple", "pp",
                 "ppa", "abc", "cabc", "bcab", std::string(64, 'a'), std::string(300, 'a'), std::string(601, 'a')});
 }
@@ -307,7 +278,7 @@ static void sound_on_random_bytes() {
     }
     rows.push_back(std::string("\xff\xff\xff\xff", 4));
     rows.push_back(std::string("\x00\xff\x00\xff", 4));
-    Column col = compress_rows(rows);
+    Column col = column(rows);
     CHECK_MSG(col.freq.count[ESCAPE] > 0, "random bytes should escape");
     std::vector<std::string> patterns = {std::string(1, '\xff'), std::string("\xff\xff", 2), std::string(1, '\0'),
                                          std::string("\x00\xff", 2)};
@@ -335,7 +306,7 @@ static void sound_with_escapes_inside_the_needle() {
     rows.push_back("\x80");
     rows.push_back("ab\x80");
     rows.push_back("\x80\x80\x80");
-    Column col = compress_rows(rows);
+    Column col = column(rows);
     CHECK_MSG(col.freq.count[ESCAPE] > 0, "rare bytes should escape");
     size_t before = g_escape_edges;
     check(col, {std::string(1, '\x80'), "page\x80", "\x80\x81page", "e\x80\x81p", "\x90user", "user=1\x91",
@@ -344,46 +315,33 @@ static void sound_with_escapes_inside_the_needle() {
     CHECK_MSG(g_pair_edges > 0, "no pattern built a pair edge");
 }
 
-// anchored_rows against byte prefix and suffix on rows the real encoder
+// The anchored walks against byte prefix and suffix on rows the real encoder
 // compressed: the end anchor relies on its parse at the end of a string.
 static bool anchored_at(const std::string& row, const std::string& pat, Anchor anchor) {
     if (row.size() < pat.size()) return false;
     return row.compare(anchor == Anchor::Start ? 0 : row.size() - pat.size(), pat.size(), pat) == 0;
 }
 
+template <Anchor A>
+static std::vector<uint32_t> anchored_rows(const Column& col, const scan::Walk& walk) {
+    std::vector<uint32_t> got;
+    for (uint32_t r = 0; r < col.row_count(); ++r)
+        if (walk.check_anchored<A>(col.dict, col.codes.data(), col.offsets[r], col.offsets[r + 1])) got.push_back(r);
+    return got;
+}
+
 static void check_anchored(const Column& col, const std::vector<std::string>& patterns) {
-    std::vector<int32_t> starts;
-    std::vector<uint32_t> lengths;
-    for (size_t r = 0; r < col.row_count(); ++r) {
-        starts.push_back(static_cast<int32_t>(col.offsets[r]));
-        lengths.push_back(col.offsets[r + 1] - col.offsets[r]);
-    }
-    // every other row, as a selection from an earlier filter
-    std::vector<uint32_t> odd_rows;
-    for (uint32_t r = 1; r < col.row_count(); r += 2) odd_rows.push_back(r);
-    auto rows_of = [&](const scan::Walk& walk, const std::vector<uint32_t>* sel) {
-        const size_t count = sel ? sel->size() : col.row_count();
-        std::vector<uint32_t> got(count);
-        got.resize(anchored_rows(col.codes.data(), starts.data(), lengths.data(), sel ? sel->data() : nullptr, count,
-                                 col.dict, walk, got.data()));
-        return got;
-    };
     for (const std::string& pat : patterns) {
         if (pat.empty()) continue;
         for (const Anchor anchor : {Anchor::Start, Anchor::End}) {
-            std::vector<uint32_t> want, want_odd;
-            for (uint32_t r = 0; r < col.row_count(); ++r) {
-                if (!anchored_at(col.rows[r], pat, anchor)) continue;
-                want.push_back(r);
-                if (r % 2 == 1) want_odd.push_back(r);
-            }
+            std::vector<uint32_t> want;
+            for (uint32_t r = 0; r < col.row_count(); ++r)
+                if (anchored_at(col.rows[r], pat, anchor)) want.push_back(r);
             Analysis a = analyze(bytes(pat), pat.size(), col.dict, col.freq, col.row_count(), anchor);
-            std::vector<uint32_t> got = rows_of(a.walk, nullptr);
+            std::vector<uint32_t> got = anchor == Anchor::Start ? anchored_rows<Anchor::Start>(col, a.walk)
+                                                                : anchored_rows<Anchor::End>(col, a.walk);
             CHECK_MSG(got == want, "%s anchored at the %s: %zu rows against %zu", pat.c_str(),
                       anchor == Anchor::Start ? "start" : "end", got.size(), want.size());
-            got = rows_of(a.walk, &odd_rows);
-            CHECK_MSG(got == want_odd, "%s anchored at the %s, odd rows: %zu rows against %zu", pat.c_str(),
-                      anchor == Anchor::Start ? "start" : "end", got.size(), want_odd.size());
         }
     }
 }
@@ -400,7 +358,7 @@ static void anchored_rows_match_prefix_and_suffix() {
     for (const std::string& r : {rare, std::string("page\x80"), std::string("\x80page"), std::string("x\xff\xff"),
                                  std::string("\xff\xffy"), std::string("\xff"), std::string("ab\x80\x81")})
         rows.push_back(r);
-    Column col = compress_rows(rows);
+    Column col = column(rows);
     std::vector<std::string> patterns = {"a", "aa", "aaa", "e", "le", "pple", "apple", "app", "abc", "cab",
                                          "http", "https://", "https://www.example.com", "docs", "\x80",
                                          "\xff", "\xff\xff", "\x80\x81", "page\x80", "zzz absent"};
@@ -417,17 +375,17 @@ static void anchored_rows_match_prefix_and_suffix() {
 }
 
 static void empty_probe_cover_appends_nothing() {
-    Column col = compress_rows({"alpha", "beta", "gamma"});
+    Column col = column({"alpha", "beta", "gamma"});
     Analysis a = analyze(bytes("\x01\x02\x03"), 3, col.dict, col.freq, col.row_count());
     std::vector<size_t> got;
-    candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, got);
+    candidate_rows(col.stream(), col.dict, a, got);
     CHECK(rows_containing(col, "\x01\x02\x03").empty());
     CHECK(got.empty());
 }
 
 static void false_zero_frequencies_cannot_hide_a_true_match() {
     std::vector<std::string> rows = {"alpha beta", "gamma", "alphabet soup", "delta"};
-    Column col = compress_rows(rows);
+    Column col = column(rows);
     Frequency zeros;
     zeros.total = col.freq.total;
     std::string pat = "alpha";
@@ -436,7 +394,7 @@ static void false_zero_frequencies_cannot_hide_a_true_match() {
     CHECK(a.covered_frequency == 0);
     std::vector<size_t> want = rows_containing(col, pat);
     std::vector<size_t> exact;
-    candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, exact);
+    candidate_rows(col.stream(), col.dict, a, exact);
     CHECK(exact == want);
 }
 
@@ -452,9 +410,9 @@ static void cover_probes_the_maximal_runs_of_its_membership() {
     CHECK(top.points.empty() && top.ranges.size() == 1 && top.ranges[0].last == 255);
 }
 
-static void sweep_prices_at_or_below_the_frequency_cut() {
+static void planned_cover_prices_at_or_below_the_frequency_cut() {
     Rng rng{5};
-    Column col = compress_rows(url_rows(500, rng));
+    Column col = column(url_rows(500, rng));
     scan::policy::Region region{col.codes.size(), col.row_count()};
     for (std::string pat : {"e", "://", ".com/page", "https://www.example.com", "user=1"}) {
         AlignmentGraph g = build_alignment_graph(col.dict, bytes(pat), pat.size(), col.freq);
@@ -502,10 +460,10 @@ static void deep_chain_does_not_exhaust_the_stack() {
     CHECK(steps(min_cut(g, by_frequency)) == Steps({{len / 2, len / 2 + 1}}));
 }
 
-// One Finder for every call, so the layer is reused with stale entries.
+// One Finder for every call, so its scratch is reused with stale entries.
 static void selected_scan_is_the_full_scan_filtered() {
     Rng rng{5};
-    Column col = compress_rows(url_rows(3000, rng));
+    Column col = column(url_rows(3000, rng));
     const uint32_t n = static_cast<uint32_t>(col.row_count());
     std::vector<std::vector<uint32_t>> selections = {{}, {0}, {n - 1}};
     std::vector<uint32_t> all, step7, runs, sparse;
@@ -516,20 +474,48 @@ static void selected_scan_is_the_full_scan_filtered() {
         if (r * 2654435761u % 97 < 3) sparse.push_back(r);
     }
     selections.insert(selections.end(), {all, step7, runs, sparse});
-    Finder finder(n);
+    Finder finder;
     for (std::string pat : {"example", ".com", "://", "page", "user", "", "zzzzqq"}) {
         Analysis a = analyze(bytes(pat), pat.size(), col.dict, col.freq, col.row_count());
         std::vector<size_t> full;
-        candidate_rows(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a, full);
+        candidate_rows(col.stream(), col.dict, a, full);
         for (const auto& sel : selections) {
             std::vector<size_t> want, got;
             for (size_t r : full)
                 if (std::binary_search(sel.begin(), sel.end(), static_cast<uint32_t>(r))) want.push_back(r);
-            finder.find(col.codes.data(), col.codes.size(), col.offsets.data(), col.offsets.size(), col.dict, a,
-                        sel.data(), sel.size(), got);
+            finder.find(col.stream(), col.dict, a, sel.data(), sel.size(), got);
             CHECK_MSG(got == want, "%s, %zu selected: %zu rows against %zu", pat.c_str(), sel.size(), got.size(),
                       want.size());
         }
+    }
+}
+
+// The per-row scan of a sparse selection over rows of several 64-code blocks,
+// with the match in a late block, empty rows, and the last row selected.
+static void sparse_selection_over_long_rows() {
+    std::vector<std::string> rows;
+    for (uint32_t i = 0; i < 600; ++i) {
+        std::string row;
+        if (i % 7 != 0) {
+            for (uint32_t j = 0; j < 60 + i % 50; ++j) row += "w" + std::to_string((i * 31 + j) % 997) + " ";
+            if (i % 3 == 0) row += "sunflower";
+        }
+        rows.push_back(row);
+    }
+    Column col = column(rows);
+    const uint32_t n = static_cast<uint32_t>(col.row_count());
+    std::vector<uint32_t> sel;
+    for (uint32_t r = 0; r < n; ++r)
+        if (r % 41 == 0 || r % 41 == 3 || r == n - 1) sel.push_back(r);
+    Finder finder;
+    for (std::string pat : {"sunflower", "w1", "zzzzqq"}) {
+        Analysis a = analyze(bytes(pat), pat.size(), col.dict, col.freq, col.row_count());
+        std::vector<size_t> full, want, got;
+        candidate_rows(col.stream(), col.dict, a, full);
+        for (size_t r : full)
+            if (std::binary_search(sel.begin(), sel.end(), static_cast<uint32_t>(r))) want.push_back(r);
+        finder.find(col.stream(), col.dict, a, sel.data(), sel.size(), got);
+        CHECK_MSG(got == want, "%s: %zu rows against %zu", pat.c_str(), got.size(), want.size());
     }
 }
 
@@ -545,7 +531,8 @@ int main() {
     anchored_rows_match_prefix_and_suffix();
     empty_probe_cover_appends_nothing();
     false_zero_frequencies_cannot_hide_a_true_match();
-    sweep_prices_at_or_below_the_frequency_cut();
+    planned_cover_prices_at_or_below_the_frequency_cut();
     selected_scan_is_the_full_scan_filtered();
+    sparse_selection_over_long_rows();
     return finish("prefilter tests");
 }

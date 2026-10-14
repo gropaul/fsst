@@ -1,6 +1,7 @@
 #pragma once
 
-// The timer, the machine name and the CSV writer the sweeps share.
+// The timer, the machine name, the file readers and the CSV writer the
+// sweeps and tools share.
 
 #include <chrono>
 #include <cmath>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,10 +19,22 @@ namespace fsst::search::prefilter::scan::bench {
 
 constexpr int PASSES = 5;
 
-// A stage-two check that passes every hit: the scan alone, without a walk.
-struct AcceptAll {
-    bool passes(size_t, size_t, size_t) const { return true; }
-};
+inline std::string read_file(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error(path.string() + ": cannot open");
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+inline std::vector<std::string> split(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    size_t at = 0;
+    while (true) {
+        size_t end = s.find(sep, at);
+        out.push_back(s.substr(at, end == std::string::npos ? std::string::npos : end - at));
+        if (end == std::string::npos) return out;
+        at = end + 1;
+    }
+}
 
 // Seconds of the fastest of PASSES runs after one untimed. A run the clock
 // cannot resolve is repeated inside the timed region until it can.
@@ -144,23 +158,13 @@ inline std::vector<std::map<std::string, std::string>> read_csv(const std::files
         std::fprintf(stderr, "cannot read %s\n", path.c_str());
         std::exit(1);
     }
-    auto split = [](const std::string& line) {
-        std::vector<std::string> out;
-        size_t at = 0;
-        while (true) {
-            size_t end = line.find(',', at);
-            out.push_back(line.substr(at, end == std::string::npos ? std::string::npos : end - at));
-            if (end == std::string::npos) return out;
-            at = end + 1;
-        }
-    };
     std::string line;
     std::getline(in, line);
-    std::vector<std::string> header = split(line);
+    std::vector<std::string> header = split(line, ',');
     std::vector<std::map<std::string, std::string>> rows;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
-        std::vector<std::string> field = split(line);
+        std::vector<std::string> field = split(line, ',');
         std::map<std::string, std::string> row;
         for (size_t i = 0; i < header.size() && i < field.size(); ++i) row[header[i]] = field[i];
         rows.push_back(std::move(row));

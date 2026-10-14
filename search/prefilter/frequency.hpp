@@ -47,7 +47,8 @@ struct Frequency {
     uint32_t of_range(CodeRange r) const { return cum[static_cast<size_t>(r.last) + 1] - cum[r.begin]; }
 
     // `codes` distinct, so the sum stays within total.
-    uint32_t of_codes(const std::vector<uint8_t>& codes) const {
+    template <typename Codes>
+    uint32_t of_codes(const Codes& codes) const {
         uint32_t sum = 0;
         for (uint8_t c : codes) sum += count[c];
         return sum;

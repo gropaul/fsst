@@ -96,18 +96,6 @@ static void scan_cost_is_monotone_in_probes_and_coverage() {
     CHECK(scan_ns(probe(8, 0), 1000, region) <= scan_ns(probe(64, 0), 1000, region) + 1e-9);
 }
 
-static std::vector<size_t> rows_oracle(const ProbeCover& cover, const std::vector<uint8_t>& codes,
-                                       const std::vector<uint32_t>& offsets) {
-    std::vector<size_t> out;
-    for (size_t row = 0; row + 1 < offsets.size(); ++row)
-        for (size_t i = offsets[row]; i < offsets[row + 1]; ++i)
-            if (cover.matches(codes.data(), i, codes.size())) {
-                out.push_back(row);
-                break;
-            }
-    return out;
-}
-
 // Every plan the region and cover can produce, run end to end.
 static void the_planned_scan_agrees_with_the_rows() {
     Rng rng{11};
@@ -116,22 +104,22 @@ static void the_planned_scan_agrees_with_the_rows() {
     std::vector<uint32_t> offsets{0};
     while (offsets.back() < codes.size())
         offsets.push_back(static_cast<uint32_t>(std::min<size_t>(codes.size(), offsets.back() + rng.below(20) + 1)));
+    const Stream s{codes.data(), codes.size(), offsets.data(), offsets.size()};
     for (ProbeCover cover : {probe(1, 0), probe(2, 0), probe(3, 0), probe(9, 0), probe(0, 1), probe(0, 4),
                              probe(1, 1), probe(1, 3), ProbeCover{{200}, {}, {}}, ProbeCover{{}, {{0, 47}}, {}},
                              ProbeCover{{}, {}, {{3, 4}}}, ProbeCover{{1}, {{40, 41}}, {{3, 4}, {4, 3}}}}) {
-        auto want = rows_oracle(cover, codes, offsets);
+        auto want = rows_oracle(cover, s);
         for (size_t covered : {size_t{0}, size_t{5}, codes.size() / 100, codes.size() / 2}) {
             std::vector<size_t> got;
-            execute(cover, codes.data(), codes.size(), offsets.data(), offsets.size(), covered, codes.size(),
-                    AcceptAll{}, got);
+            execute(cover, s, covered, codes.size(), AcceptAll{}, got);
             CHECK_MSG(got == want, "K=%zu R=%zu covered %zu", cover.points.size(), cover.ranges.size(), covered);
         }
     }
     std::vector<size_t> got;
-    execute(ProbeCover{}, codes.data(), codes.size(), offsets.data(), offsets.size(), 0, codes.size(), AcceptAll{}, got);
+    execute(ProbeCover{}, s, 0, codes.size(), AcceptAll{}, got);
     CHECK(got.empty());
     std::vector<uint32_t> rowless{0};
-    execute(probe(1, 0), codes.data(), 0, rowless.data(), rowless.size(), 0, 0, AcceptAll{}, got);
+    execute(probe(1, 0), Stream{codes.data(), 0, rowless.data(), rowless.size()}, 0, 0, AcceptAll{}, got);
     CHECK(got.empty());
 }
 

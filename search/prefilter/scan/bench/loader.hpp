@@ -7,10 +7,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "utils.hpp"
 
 namespace fsst::search::prefilter::scan::bench {
 
@@ -47,12 +48,11 @@ inline std::pair<fs::path, fs::path> paths(const std::string& stream, const std:
 }
 
 inline std::string read_file(const fs::path& path, const char* producer) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
+    if (!fs::exists(path)) {
         std::fprintf(stderr, "missing %s; run %s first\n", path.c_str(), producer);
         std::exit(1);
     }
-    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return read_file(path);
 }
 
 inline uint8_t code(unsigned value, const fs::path& path) {
@@ -86,17 +86,6 @@ inline Corpus load_corpus(const fs::path& path) {
         }
     }
     return corpus;
-}
-
-inline std::vector<std::string> split(const std::string& s, char sep) {
-    std::vector<std::string> out;
-    size_t at = 0;
-    while (true) {
-        size_t end = s.find(sep, at);
-        out.push_back(s.substr(at, end == std::string::npos ? std::string::npos : end - at));
-        if (end == std::string::npos) return out;
-        at = end + 1;
-    }
 }
 
 // `l,k,target,achieved,rows,sample,codes`, needles separated by `|` and their

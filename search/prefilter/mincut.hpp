@@ -162,12 +162,4 @@ class MinCut {
     std::vector<uint32_t> cut_;
 };
 
-template <typename Weight>
-std::vector<const Edge*> min_cut(const CutGraph& graph, Weight weight) {
-    MinCut solver(graph);
-    std::vector<const Edge*> cut;
-    for (uint32_t at : solver.solve(graph, weight)) cut.push_back(&graph.edges[at]);
-    return cut;
-}
-
 }  // namespace fsst::search::prefilter

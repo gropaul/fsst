@@ -18,26 +18,20 @@
 
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
 #include <vector>
 
-#include "fsst.h"
+#include "prefilter/compress.hpp"
+#include "prefilter/scan/bench/utils.hpp"
 #include "tools/trace.hpp"
 
 namespace pf = fsst::search::prefilter;
+using pf::scan::bench::read_file;
 
-static std::vector<uint8_t> slurp(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) throw std::runtime_error(path + ": cannot open");
-    return {std::istreambuf_iterator<char>(in), {}};
-}
-
-static uint64_t u64_at(const std::vector<uint8_t>& b, size_t& at) {
+static uint64_t u64_at(const std::string& b, size_t& at) {
     uint64_t v;
     std::memcpy(&v, b.data() + at, 8);
     at += 8;
@@ -104,15 +98,15 @@ int main(int argc, char** argv) {
         throw std::runtime_error("--col, --needles, --dataset and --out are required");
     const std::string algorithm = "fsst";
 
-    const std::vector<uint8_t> raw = slurp(col);
+    const std::string raw = read_file(col);
     size_t at = 0;
     const size_t total_rows = u64_at(raw, at), payload_len = u64_at(raw, at);
     std::vector<uint64_t> offsets(total_rows + 1);
     for (auto& o : offsets) o = u64_at(raw, at);
-    const uint8_t* payload = raw.data() + at;
+    const uint8_t* payload = reinterpret_cast<const uint8_t*>(raw.data()) + at;
     if (at + payload_len != raw.size()) throw std::runtime_error(col + ": payload length mismatch");
 
-    const std::vector<uint8_t> nraw = slurp(needles_path);
+    const std::string nraw = read_file(needles_path);
     at = 0;
     std::vector<std::string> needles(u64_at(nraw, at));
     for (auto& n : needles) {
@@ -139,32 +133,9 @@ int main(int argc, char** argv) {
             str_in[r] = payload + offsets[start + r];
             bytes += len_in[r];
         }
-        fsst_encoder_t* enc = fsst_create(rows, len_in.data(), str_in.data(), 0);
-        fsst_sort_codes(enc);
-        std::vector<unsigned char> buf;
-        std::vector<size_t> len_out(rows);
-        std::vector<unsigned char*> str_out(rows);
-        size_t outsize = 7 * rows + 2 * bytes + 64, done = 0;
-        for (int attempt = 0; attempt < 8 && done != rows; ++attempt, outsize *= 2) {
-            buf.resize(outsize);
-            done = fsst_compress(enc, rows, len_in.data(), str_in.data(), outsize, buf.data(), len_out.data(),
-                                 str_out.data());
-        }
-        if (done != rows) throw std::runtime_error("fsst_compress could not fit the row group");
-        std::vector<uint8_t> codes;
-        std::vector<uint32_t> coff{0};
-        for (size_t r = 0; r < rows; ++r) {
-            codes.insert(codes.end(), str_out[r], str_out[r] + len_out[r]);
-            coff.push_back(static_cast<uint32_t>(codes.size()));
-        }
-        unsigned char header[FSST_MAXHEADER];
-        fsst_export(enc, header);
-        fsst_destroy(enc);
-        fsst_decoder_t decoder;
-        fsst_import(&decoder, header);
-        const pf::Dictionary dict = pf::Dictionary::from(reinterpret_cast<const uint64_t*>(decoder.symbol),
-                                                         decoder.len, pf::symbol_count(header));
-        const pf::Frequency freq = pf::Frequency::of(codes.data(), codes.size());
+        const pf::CompressedRows c = pf::compress_rows(rows, len_in.data(), str_in.data());
+        const pf::Dictionary& dict = c.dict;
+        const pf::Frequency& freq = c.freq;
 
         for (size_t c = 0; c < dict.count; ++c)
             std::fprintf(symbols, "%s,%zu,%s,%zu,%s,%u\n", dataset.c_str(), row_group, algorithm.c_str(), c,
@@ -184,7 +155,7 @@ int main(int argc, char** argv) {
 
             const pf::Trace t = pf::trace(np, needle.size(), dict, freq, rows);
             std::vector<size_t> admitted;
-            pf::superset_rows(codes.data(), codes.size(), coff.data(), coff.size(), t.analysis, admitted);
+            pf::superset_rows(c.stream(), t.analysis, admitted);
             if (!std::includes(admitted.begin(), admitted.end(), matching.begin(), matching.end()))
                 throw std::runtime_error(dataset + " row group " + std::to_string(row_group) +
                                          ": cover misses a match");

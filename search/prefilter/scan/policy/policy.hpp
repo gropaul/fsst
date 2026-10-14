@@ -55,39 +55,19 @@ inline bool takes(Match m, Shape s) {
     return false;
 }
 
-// ns per code; k tokens, r ranges, p pairs. One row set per kernel set,
-// picked by the build's flags like the kernels themselves.
+// ns per code; k tokens, r ranges, p pairs. Fitted on aarch64 Apple M4 Pro
+// neon, novel_mask_2026-09-15_16-09-02.csv. The x86 kernel sets are not
+// fitted: these rows stand in until prefilter_matcher_sweep --refit runs there.
 inline double ns_per_code(Match m, Shape s) {
     const double k = static_cast<double>(s.tokens);
     const double r = static_cast<double>(s.ranges);
     const double p = static_cast<double>(s.pairs);
-#if defined(__ARM_NEON)
-    // Fitted on aarch64 Apple M4 Pro neon, novel_mask_2026-09-15_16-09-02.csv.
     switch (m) {
         case Match::EqOr: return 0.00330 + 0.00721 * k + 0.01131 * r + 0.01674 * p;
         case Match::NibbleN8K: return 0.02449 + 0.01230 * r;
         case Match::Nibble: return 0.03860;
         case Match::Range: return 0.00350 + 0.01078 * r;
     }
-#elif defined(__AVX512BW__)
-    // NOT FITTED: the neon rows stand in until prefilter_matcher_sweep
-    // --refit runs on an AVX-512 host; paste its block here.
-    switch (m) {
-        case Match::EqOr: return 0.00330 + 0.00721 * k + 0.01131 * r + 0.01674 * p;
-        case Match::NibbleN8K: return 0.02449 + 0.01230 * r;
-        case Match::Nibble: return 0.03860;
-        case Match::Range: return 0.00350 + 0.01078 * r;
-    }
-#else
-    // NOT FITTED: the neon rows stand in until prefilter_matcher_sweep
-    // --refit runs on an AVX2 host; paste its block here.
-    switch (m) {
-        case Match::EqOr: return 0.00330 + 0.00721 * k + 0.01131 * r + 0.01674 * p;
-        case Match::NibbleN8K: return 0.02449 + 0.01230 * r;
-        case Match::Nibble: return 0.03860;
-        case Match::Range: return 0.00350 + 0.01078 * r;
-    }
-#endif
     return INFINITY;
 }
 
@@ -181,6 +161,15 @@ inline double scan_ns(const ProbeCover& cover, uint32_t covered, Region region) 
     double stage_two = std::min(stage_two_ns(Resolve::LinearSeek, words, emitted, rows),
                                 stage_two_ns(Resolve::GallopSeek, words, emitted, rows));
     return stage_one + stage_two + hits * WALK_NS_PER_HIT;
+}
+
+// The lambda at which a cut's weight, frequency + lambda * comparisons, is
+// its scan cost up to a constant: eq_or's ns per code and point, times the
+// codes scanned, over the walk's ns per hit. The slope is read off the fit
+// so the per-ISA rows above stay its only copy.
+inline uint64_t cost_lambda(Region region) {
+    const double per_point = ns_per_code(Match::EqOr, Shape{2, 0}) - ns_per_code(Match::EqOr, Shape{1, 0});
+    return static_cast<uint64_t>(per_point * static_cast<double>(region.code_count) / WALK_NS_PER_HIT);
 }
 
 }  // namespace fsst::search::prefilter::scan::policy

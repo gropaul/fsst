@@ -2,8 +2,8 @@
 
 // The planner's alignment graph and chosen cut, for logging and figures.
 // Paper tooling, removable as a whole: this directory, the plan_log target in
-// search/CMakeLists.txt, and the two hooks it reads, CutGraph::origin and
-// Planned::cut.
+// search/CMakeLists.txt, and the two optional outputs it reads, the `origin`
+// of CutGraph::with_pairs and the `chosen` cut of cheapest_cover.
 
 #include <cassert>
 #include <cstdint>
@@ -24,34 +24,27 @@ struct Trace {
 
 // Plans a non-empty pattern as analyze does, keeping the graph and the cut.
 inline Trace trace(const uint8_t* pattern, size_t n, const Dictionary& dict, const Frequency& freq, size_t row_count) {
-    assert(n > 0 && n <= MAX_PATTERN_LEN);
+    assert(n > 0);
     Trace t{build_alignment_graph(dict, pattern, n, freq), {}, {}, {}};
-    const CutGraph cg = CutGraph::with_pairs(t.graph, freq);
-    Planned p = cheapest_cover(cg, freq, scan::policy::Region{freq.total, row_count});
+    std::vector<uint32_t> origin, chosen;
+    const CutGraph cg = CutGraph::with_pairs(t.graph, freq, &origin);
+    Planned p = cheapest_cover(cg, freq, scan::policy::Region{freq.total, row_count}, &chosen);
     t.cut.assign(t.graph.edges.size(), false);
     t.paired.assign(t.graph.edges.size(), {});
-    for (uint32_t at : p.cut) {
+    for (uint32_t at : chosen) {
         const Edge& e = cg.edges[at];
         if (e.probe == Probe::Pair)
-            t.paired[cg.origin[at]].push_back(e.pair.first);
+            t.paired[origin[at]].push_back(e.pair.first);
         else
-            t.cut[cg.origin[at]] = true;
+            t.cut[origin[at]] = true;
     }
-    t.analysis = Analysis{std::move(p.cover), p.covered, freq.total, p.scan_ns, scan::Walk(t.graph, pattern), false};
+    t.analysis = Analysis{std::move(p.cover), p.covered, freq.total, scan::Walk(t.graph, pattern), false};
     return t;
 }
 
-// Every hit passes: the rows holding a covered code, a sound superset.
-struct AnyHit {
-    bool passes(size_t, size_t, size_t) const { return true; }
-};
-
 // Ascending rows holding a covered code of a non-empty pattern's analysis.
-template <typename O>
-void superset_rows(const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len,
-                   const Analysis& analysis, std::vector<size_t>& out) {
-    scan::execute(analysis.cover, codes, len, row_offsets, offsets_len, analysis.covered_frequency,
-                  analysis.total_frequency, AnyHit{}, out);
+inline void superset_rows(const scan::Stream& s, const Analysis& analysis, std::vector<size_t>& out) {
+    execute(analysis, s, scan::AcceptAll{}, out);
 }
 
 }  // namespace fsst::search::prefilter

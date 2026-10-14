@@ -25,6 +25,7 @@
 #include "../matcher/range.hpp"
 #include "../resolver/linear_seek.hpp"
 #include "../scan.hpp"
+#include "../tests.hpp"
 #include "loader.hpp"
 #include "utils.hpp"
 
@@ -142,12 +143,10 @@ static std::vector<Probe> probes(const std::vector<NeedleSet>& sets) {
     return out;
 }
 
-struct Stream {
-    const uint8_t* codes;
+struct Timing {
+    const uint8_t* codes;  // the prefix timed
     size_t len;
-    const uint8_t* checked;
-    size_t checked_len;
-    const std::vector<uint32_t>* check_rows;
+    Stream checked;  // the shorter prefix every kernel's rows are checked on
 };
 
 struct Timed {
@@ -156,7 +155,7 @@ struct Timed {
 };
 
 template <typename M>
-static Timed time_kernel(const Probe& probe, const Stream& s) {
+static Timed time_kernel(const Probe& probe, const Timing& s) {
     ProbeCover cover = probe.cover();
     M matcher(cover);
     Mask bits{};
@@ -168,12 +167,11 @@ static Timed time_kernel(const Probe& probe, const Stream& s) {
         });
     });
     std::vector<size_t> found;
-    both_stages<M, resolver::LinearSeek<uint32_t>>(cover, s.checked, s.checked_len, s.check_rows->data(),
-                                                   s.check_rows->size(), AcceptAll{}, found);
+    both_stages<M, resolver::LinearSeek>(cover, s.checked, AcceptAll{}, found);
     return {seconds, std::move(found)};
 }
 
-using Run = std::function<std::optional<Timed>(const Probe&, const Stream&)>;
+using Run = std::function<std::optional<Timed>(const Probe&, const Timing&)>;
 
 struct Kernel {
     const char* name;
@@ -182,7 +180,7 @@ struct Kernel {
 
 template <typename M>
 static Run only_if(std::function<bool(size_t, size_t, size_t)> takes) {
-    return [takes](const Probe& probe, const Stream& s) -> std::optional<Timed> {
+    return [takes](const Probe& probe, const Timing& s) -> std::optional<Timed> {
         ProbeCover cover = probe.cover();
         if (!takes(cover.points.size(), cover.ranges.size(), cover.pairs.size())) return std::nullopt;
         return time_kernel<M>(probe, s);
@@ -192,7 +190,7 @@ static Run only_if(std::function<bool(size_t, size_t, size_t)> takes) {
 // NibbleN8 at ceil(K / 8) batches, measured past the one batch the planner
 // picks at u8 so the figure shows where the batches stop paying.
 template <bool SKIP, size_t... B>
-static std::optional<Timed> n8k_at(size_t batches, const Probe& probe, const Stream& s,
+static std::optional<Timed> n8k_at(size_t batches, const Probe& probe, const Timing& s,
                                    std::index_sequence<B...>) {
     std::optional<Timed> out;
     (void)((batches == B + 1 ? (out = time_kernel<matcher::NibbleN8<B + 1, SKIP>>(probe, s), true) : false) ||
@@ -202,7 +200,7 @@ static std::optional<Timed> n8k_at(size_t batches, const Probe& probe, const Str
 
 template <bool SKIP>
 static Run nibble_n8k() {
-    return [](const Probe& probe, const Stream& s) -> std::optional<Timed> {
+    return [](const Probe& probe, const Timing& s) -> std::optional<Timed> {
         size_t k = probe.cover().points.size();
         if (k == 0 || !probe.pairs.empty()) return std::nullopt;
         size_t batches = (k + matcher::PER_BATCH - 1) / matcher::PER_BATCH;
@@ -252,17 +250,11 @@ static void measure(const std::string& stream, const std::vector<Kernel>& kernel
 
     size_t checked_len = std::min(CHECK_CODES, len);
     std::vector<uint32_t> check_rows = row_layer(corpus.row_offsets, checked_len);
-    Stream s{corpus.codes.data(), len, corpus.codes.data(), checked_len, &check_rows};
+    Timing s{corpus.codes.data(), len, Stream{corpus.codes.data(), checked_len, check_rows.data(), check_rows.size()}};
 
     for (const Probe& probe : all) {
         ProbeCover cover = probe.cover();
-        std::vector<size_t> expected;
-        for (size_t row = 0; row + 1 < check_rows.size(); ++row)
-            for (size_t i = check_rows[row]; i < check_rows[row + 1]; ++i)
-                if (cover.matches(corpus.codes.data(), i, checked_len)) {
-                    expected.push_back(row);
-                    break;
-                }
+        std::vector<size_t> expected = rows_oracle(cover, s.checked);
         for (const Kernel& kernel : kernels) {
             std::optional<Timed> timed = kernel.run(probe, s);
             if (!timed) continue;

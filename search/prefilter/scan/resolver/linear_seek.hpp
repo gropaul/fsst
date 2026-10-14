@@ -6,12 +6,9 @@
 
 namespace fsst::search::prefilter::scan::resolver {
 
-template <typename O>
 class LinearSeek {
    public:
-    using Offset = O;
-
-    LinearSeek(const O* row_offsets, size_t offsets_len) : cursor_(row_offsets, offsets_len) {}
+    LinearSeek(const uint32_t* row_offsets, size_t offsets_len) : cursor_(row_offsets, offsets_len) {}
 
     template <size_t W, typename Check>
     void rows(const Bits<W>& bits, size_t first_code, const Check& check, std::vector<size_t>& out) {
@@ -19,13 +16,13 @@ class LinearSeek {
     }
 
    private:
-    static size_t walk(const O* row_offsets, size_t, size_t from, size_t code) {
+    static size_t walk(const uint32_t* row_offsets, size_t, size_t from, size_t code) {
         size_t row = from;
-        while (static_cast<size_t>(row_offsets[row + 1]) <= code) ++row;
+        while (row_offsets[row + 1] <= code) ++row;
         return row;
     }
 
-    Cursor<O> cursor_;
+    Cursor cursor_;
 };
 
 }  // namespace fsst::search::prefilter::scan::resolver

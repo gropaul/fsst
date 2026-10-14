@@ -22,21 +22,30 @@ inline size_t expected_hits(size_t covered_frequency, size_t total_frequency, si
 
 // None where the region admits nothing whatever runs over it: an empty
 // cover proves no row matches, and a region with no rows has nothing to emit.
-inline std::optional<policy::Facts> facts(const ProbeCover& cover, size_t code_count, size_t offsets_len,
-                                          size_t covered_frequency, size_t total_frequency) {
-    size_t row_count = offsets_len == 0 ? 0 : offsets_len - 1;
-    if (cover.empty() || row_count == 0) return std::nullopt;
-    return policy::Facts{expected_hits(covered_frequency, total_frequency, code_count), code_count, row_count};
+inline std::optional<policy::Facts> facts(const ProbeCover& cover, const Stream& s, size_t covered_frequency,
+                                          size_t total_frequency) {
+    if (cover.empty() || s.row_count() == 0) return std::nullopt;
+    return policy::Facts{expected_hits(covered_frequency, total_frequency, s.len), s.len, s.row_count()};
 }
 
 // The planned scan over one region under whatever stage two asks of a hit.
 // `covered_frequency` and `total_frequency` are the frequency index's counts.
-template <typename O, typename Check>
-void execute(const ProbeCover& cover, const uint8_t* codes, size_t len, const O* row_offsets, size_t offsets_len,
-             size_t covered_frequency, size_t total_frequency, const Check& check, std::vector<size_t>& out) {
-    auto f = facts(cover, len, offsets_len, covered_frequency, total_frequency);
+template <typename Check>
+void execute(const ProbeCover& cover, const Stream& s, size_t covered_frequency, size_t total_frequency,
+             const Check& check, std::vector<size_t>& out) {
+    auto f = facts(cover, s, covered_frequency, total_frequency);
     if (!f) return;
-    dispatch::run<O>(policy::select(cover, *f), cover, codes, len, row_offsets, offsets_len, check, out);
+    dispatch::run(policy::select(cover, *f), cover, s, check, out);
+}
+
+// The planned scan over the rows of `selection` only, each on its own. The
+// facts are the whole region's, as the full scan's would be.
+template <typename Check>
+void execute_selected(const ProbeCover& cover, const Stream& s, size_t covered_frequency, size_t total_frequency,
+                      const uint32_t* selection, size_t count, const Check& check, std::vector<size_t>& out) {
+    auto f = facts(cover, s, covered_frequency, total_frequency);
+    if (!f) return;
+    dispatch::run_selected(policy::select(cover, *f), cover, s, selection, count, check, out);
 }
 
 }  // namespace fsst::search::prefilter::scan

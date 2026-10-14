@@ -13,7 +13,7 @@ unless marked `old:`. Sections 3 and 9 hold what FSST adds that neither Rust
 version handles.
 
 ```
-needle bytes ──► graph ──► min cut (λ sweep) ──► cover ──► scan ──► rows
+needle bytes ──► graph ──► min cut (two λ) ──► cover ──► scan ──► rows
                   │                                          ▲
                   └──────────────── walk ────────────────────┘  (exact check per hit)
 ```
@@ -45,10 +45,10 @@ memmem.
 
 | file | holds | port |
 | --- | --- | --- |
-| `mod.rs` | `analyze_prefilter`, `prefilter_candidates` (exact), `prefilter_superset`, `PrefilterAnalysis`, `MAX_PATTERN_LEN`, empty-pattern handling | port |
+| `mod.rs` | `analyze_prefilter`, `prefilter_candidates` (exact), `prefilter_superset`, `PrefilterAnalysis`, empty-pattern handling | port; no pattern length limit, the walk's node ids are u32 |
 | `graph.rs` | alignment DAG builder, candidate sweep, greedy parse, `ProbeCover::from_edge_cut` | port with FSST changes (§4, §9) |
 | `mincut.rs` | Dinic max-flow and cut extraction; unchanged since old | port as is |
-| `plan.rs` | λ sweep, `cheapest_cover`, `cover_frequency` | port |
+| `plan.rs` | λ cuts, `cheapest_cover`, `cover_frequency` | port |
 | `cover.rs` | `ProbeCover::from_runs` | port |
 | `scan/mod.rs` | `BLOCK`, block driver, `Check`, `Facts` construction, `both_stages`, `Isa` | port |
 | `scan/policy/mod.rs` | matcher and resolver selection, fitted cost rows, `scan_ns` | port; u8 rows from old |
@@ -223,7 +223,7 @@ readable), and the walk is unchanged since the hit is a greedy step. The
 stream's last code pairs with padding; `both_stages` resets that bit to
 the plain membership test.
 
-## 5. Min cut and the λ sweep (`mincut.rs`, `plan.rs`)
+## 5. Min cut and the λ cuts (`mincut.rs`, `plan.rs`)
 
 **Min cut.** Dinic on `n + 1` nodes with CSR adjacency. A cuttable edge's
 capacity is its weight; `SetTooBig` gets `sum(finite weights) + 1`. Max flow
@@ -231,19 +231,19 @@ must stay below that (assert: otherwise a path has no probe). The cut is
 every cuttable edge with `level[from] >= 0 && level[to] < 0` after the last
 BFS. The solver is built once per graph and refilled per λ.
 
-**Sweep.** Unchanged from old:
+**Two cuts.** The old ladder over λ = 0, 1, 4, 16, … is gone. Under the
+linear part of `scan_ns` a cut costs `codes · per_point · points + hits ·
+WALK_NS_PER_HIT`, so weighting at `λ = per_point · codes / WALK_NS_PER_HIT`
+(`policy::cost_lambda`) makes the min cut the model's optimum directly. The
+narrowest cut is priced too, since the kernel choice bends the model past
+two points.
 
 ```
 weight_λ(e) = frequency(e) + λ · (points(e) + 2 · ranges(e) + 2 · pairs(e))
               # Point (1,0), Range (0,1), Set(ids) (len,0), SetTooBig (0,0), Pair (0,0,1)
 ceiling = total_frequency
 narrowest = cut(weight_{ceiling+1}); price(narrowest)
-λ = 0; last = none
-while λ <= ceiling:
-    c = cut(weight_λ)
-    if c == narrowest: break
-    if c != last: last = c; price(c)
-    λ = max(4·λ, 1)
+c = cut(weight_{min(cost_lambda, ceiling)}); if c != narrowest: price(c)
 best = argmin scan_ns over priced cuts
 ```
 
@@ -255,8 +255,8 @@ code_count = total_frequency, row_count }`. `scan_ns` now lives in
 **Outputs (`mod.rs`).** `PrefilterAnalysis { cover, covered_frequency,
 total_frequency, scan_ns, walk, matches_all }`. The empty pattern sets
 `matches_all` and both execute functions append every row without a scan.
-`analyze_prefilter` asserts `n ≤ MAX_PATTERN_LEN = 65535`, which is what the
-walk's u16 node ids hold. `prefilter_candidates` runs the walk on every hit;
+The C++ walk's node ids are u32, so there is no pattern length limit.
+`prefilter_candidates` runs the walk on every hit;
 `prefilter_superset` runs the same plan with `Check::Superset`. An empty
 cover on a non-empty pattern appends nothing. `prefilter_is_likely_profitable`
 (comparisons ≤ 16 and candidate row fraction < 0.10) is the older heuristic;
@@ -533,7 +533,7 @@ against the new structure:
 | `walk.rs` `backward` | unit ending at `end - 1` is a token | if the run of 255s ending at `end - 2` is odd, the unit is the literal `codes[end - 1]` and only the escape edge into `node` with that byte can match; then `end -= 2` |
 | `walk.rs` `check` | every hit is a token | a hit at `i` whose preceding run of 255s is odd is a literal: skip it. A hit on code 255 with an even run before it is a marker: try the escape edges whose byte is `codes[i + 1]` |
 | `walk.rs` `NeedlePrefix` | u128 window, `MAX_TOKEN_SIZE` 16 | u64 `symbol[c]`, `len[c]`, `MAX_TOKEN_SIZE` 8 |
-| `mod.rs` `MAX_PATTERN_LEN` | 65535 | keep |
+| `mod.rs` `MAX_PATTERN_LEN` | 65535 | dropped: u32 node ids in the walk |
 | `scan/matcher/*` | u16 lanes | u8 lanes from old, plus `nibble` from old |
 | `scan/policy/mod.rs` | u16 cost rows, no `nibble` | u8 rows from old (§6.5), `nibble` in the kernel list with cost 0.0386 and `takes` always |
 | `old: src/fsst/encode.rs` | sort symbols, remap stream, pass escapes through | the compressor writes sorted codes itself (`fsst_sort_codes`, §3); read `fsst_decoder_t` directly |
@@ -589,7 +589,7 @@ and for the policy `old: scan/novel/policy/tests.rs` (new has none):
   threshold; the planned scan agrees with the scalar matcher plus either
   resolver.
 - **Pricing**: `scan_cost_is_monotone_in_probes_and_coverage`,
-  `sweep_prices_at_or_below_the_frequency_cut`,
+  `planned_cover_prices_at_or_below_the_frequency_cut`,
   `split_scan_returns_exact_rows`.
 
 ## 11. Stage one sweep (`search/prefilter/scan/bench/`)
@@ -677,4 +677,4 @@ draws it.
 | location | new sources under `search/` in this repo, C++17, library target |
 | pair probes | in, via the unrolled cut graph (§4), a one-symbol terminal range pairs too; pair frequency is counted exactly (`Frequency::pairs`, 256 KB, same pass; the independence estimate ranked `g`,`o` at 3.4k against 25k real and bought nothing); the sweep has pairs-alone rows at P in {1, 2, 4, 8} (`pairs` column) and `eq_or` is fitted at 0.01674 ns per code per pair |
 | raw codes | sorted codes, written by the compressor: `fsst_sort_codes` permutes the codes at the write sites into byte order of their symbols (§3); a `Range` edge is one `CodeRange` weighing `(0, 1)`, a `Set` edge's weight counts the runs its codes merge to |
-| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, exact `candidate_rows`, `MAX_PATTERN_LEN`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |
+| C++ layout | header-only under `search/prefilter/`, one file per Rust module: `cover.hpp`, `scan/scan.hpp` (driver, `both_stages`), `scan/matcher/{shared,eq_or,range,nibble_n8,nibble}.hpp`, `scan/resolver/{shared,linear_seek,gallop_seek}.hpp`, `scan/policy/policy.hpp` (selection and `scan_ns` with the fitted constants), `scan/dispatch.hpp`, `scan/execute.hpp` (facts and the planned run, the rest of Rust's `scan/mod.rs`), `dictionary.hpp` (symbol table as code to bytes, `MAX_TOKEN_SIZE`, `ESCAPE`), `frequency.hpp` (`count[256]`), `graph.hpp` (`Edge`, `Candidates`, `build_alignment_graph`, `from_edge_cut`), `mincut.hpp`, `plan.hpp` (`cheapest_cover`, `plan`), `prefilter.hpp` (`Analysis` with its `Walk`, `analyze`, `execute` over an `Analysis`, exact `candidate_rows`, `Finder`), `scan/walk/walk.hpp` (`Walk`, `WalkCheck`), `compress.hpp` (the FSST round trip the tests and tools share); tests as `tests.cpp` beside each module, registered with ctest from `search/CMakeLists.txt`; `prefilter/tests.cpp` links `fsst` and compresses its own rows |

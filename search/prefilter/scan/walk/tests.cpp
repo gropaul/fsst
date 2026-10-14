@@ -243,8 +243,8 @@ static void prefix_through_escaped_escapes() {
         Walk walk(graph, pat);
         for (size_t row_index = 0; row_index < rows.size(); ++row_index) {
             const size_t row_start_index = col.offsets[row_index], row_end_index = col.offsets[row_index + 1];
-            const bool got =
-                walk.check_anchored(col.dict, col.codes.data(), row_start_index, row_end_index);
+            const bool got = walk.check_anchored<Anchor::Start>(col.dict, col.codes.data(), row_start_index,
+                                                                row_end_index);
             const bool expected = rows[row_index].compare(0, needle.size(), needle) == 0;
             CHECK_MSG(got == expected, "needle %zu bytes row %zu", needle.size(), row_index);
         }
@@ -265,7 +265,7 @@ static void ends_decides(const std::string& singles, const std::vector<std::stri
         const std::string& row = rows[row_index];
         const bool expected =
             row.size() >= needle.size() && row.compare(row.size() - needle.size(), needle.size(), needle) == 0;
-        const bool got = walk.check_anchored(col.dict, col.codes.data(), row_start_index, row_end_index);
+        const bool got = walk.check_anchored<Anchor::End>(col.dict, col.codes.data(), row_start_index, row_end_index);
         CHECK_MSG(got == expected, "needle %s row %zu", needle.c_str(), row_index);
     }
 }

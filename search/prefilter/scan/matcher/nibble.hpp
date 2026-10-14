@@ -29,12 +29,10 @@ class Nibble {
         high_ = table(high);
     }
 
-    // 1 << (high nibble % 8), indexed by the whole high nibble.
-    static constexpr uint8_t BIT[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
-
     template <size_t W>
     bool check(const uint8_t* codes, Bits<W>& bits) const {
-        const Reg bit = table(BIT);
+        // 1 << (high nibble % 8), indexed by the whole high nibble
+        const Reg bit = table(LANE_BIT);
         return words<SKIP_MOVEMASK_IF_NO_MATCH>(codes, bits, [&](V v, const uint8_t*) {
             // bit 7 kept in the index: the lookup returns 0 for the wrong half.
             V index = v & 0x8f;

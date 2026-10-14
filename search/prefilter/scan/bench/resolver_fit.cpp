@@ -21,6 +21,7 @@
 #include "../resolver/gallop_seek.hpp"
 #include "../resolver/linear_seek.hpp"
 #include "../scan.hpp"
+#include "../tests.hpp"
 #include "loader.hpp"
 #include "utils.hpp"
 
@@ -109,20 +110,6 @@ static std::vector<uint32_t> merge_rows(const std::vector<uint32_t>& layer, size
     return merged;
 }
 
-static std::vector<size_t> expected_rows(const std::vector<uint64_t>& mask, const std::vector<uint32_t>& offsets) {
-    std::vector<size_t> rows;
-    for (size_t word = 0; word < mask.size(); ++word) {
-        uint64_t set = mask[word];
-        while (set) {
-            size_t code = word * 64 + static_cast<size_t>(__builtin_ctzll(set));
-            set &= set - 1;
-            size_t row = static_cast<size_t>(std::upper_bound(offsets.begin(), offsets.end(), code) - offsets.begin()) - 1;
-            if (rows.empty() || rows.back() != row) rows.push_back(row);
-        }
-    }
-    return rows;
-}
-
 // Stage two over the stream from a mask built once: the blocks a matcher
 // would report non-empty, in order, into a buffer the passes reuse.
 template <typename R>
@@ -179,10 +166,10 @@ static void measure(const std::string& stream, const std::string& machine, std::
         for (size_t factor : MERGES) {
             std::vector<uint32_t> offsets = merge_rows(layer, factor);
             size_t rows = offsets.size() - 1;
-            std::vector<size_t> expected = expected_rows(mask, offsets);
+            std::vector<size_t> expected = rows_of_mask(mask, offsets, AcceptAll{});
             std::pair<const char*, double> timed[] = {
-                {"linear_seek", resolve<resolver::LinearSeek<uint32_t>>("linear_seek", mask, hit, offsets, expected)},
-                {"gallop_seek", resolve<resolver::GallopSeek<uint32_t>>("gallop_seek", mask, hit, offsets, expected)},
+                {"linear_seek", resolve<resolver::LinearSeek>("linear_seek", mask, hit, offsets, expected)},
+                {"gallop_seek", resolve<resolver::GallopSeek>("gallop_seek", mask, hit, offsets, expected)},
             };
             for (auto& [name, seconds] : timed)
                 out.push_back(Row{stream, len, rows, len / rows, name, 1, set.count, set.target, set.achieved,

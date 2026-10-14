@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstring>
+#include <initializer_list>
 #include <vector>
 
 #include "cover.hpp"
@@ -35,12 +37,43 @@ enum class Probe : uint8_t { Point, Escape, Range, Set, SetTooBig, Pair };
 // section 4.
 enum class Anchor : uint8_t { None, Start, End };
 
+// An edge's codes, up to INLINE of them in place: a point or an escape is one
+// code, so only a large set reaches the heap.
+class EdgeCodes {
+   public:
+    EdgeCodes() = default;
+    EdgeCodes(std::initializer_list<uint8_t> codes) { assign(codes.begin(), codes.size()); }
+    EdgeCodes(const std::vector<uint8_t>& codes) { assign(codes.data(), codes.size()); }
+
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    const uint8_t* data() const { return size_ <= INLINE ? inline_ : heap_.data(); }
+    const uint8_t* begin() const { return data(); }
+    const uint8_t* end() const { return data() + size_; }
+    uint8_t operator[](size_t i) const { return data()[i]; }
+
+   private:
+    static constexpr size_t INLINE = 14;
+
+    void assign(const uint8_t* codes, size_t n) {
+        size_ = static_cast<uint16_t>(n);
+        if (n <= INLINE)
+            std::memcpy(inline_, codes, n);
+        else
+            heap_.assign(codes, codes + n);
+    }
+
+    uint16_t size_ = 0;
+    uint8_t inline_[INLINE] = {};
+    std::vector<uint8_t> heap_;  // used past INLINE codes; empty, it holds no memory
+};
+
 struct Edge {
     uint32_t from;
     uint32_t to;
     Probe probe;
     uint8_t byte;                // Escape only: the literal after the marker
-    std::vector<uint8_t> codes;  // Point, Escape, Set: ascending, one for Point and Escape
+    EdgeCodes codes;             // Point, Escape, Set: ascending, one for Point and Escape
     CodeRange range;             // Range only
     CodePair pair;               // Pair only
     uint32_t frequency;          // codes the probe matches in the stream; an estimate for a pair
@@ -78,20 +111,13 @@ inline ProbeCover from_edge_cut(const std::vector<const Edge*>& cut) {
     return cover;
 }
 
-// What the min cut runs on: the alignment graph as is, or unrolled one step
-// so a greedy symbol may be probed together with the symbol before it.
+// What the min cut runs on: the alignment graph unrolled one step, so a
+// greedy symbol may be probed together with the symbol before it.
 struct CutGraph {
     std::vector<Edge> edges;
     size_t node_count;
     uint32_t source;
     uint32_t sink;
-    std::vector<uint32_t> origin;  // per edge, the alignment edge it was copied from (search/tools/trace.hpp)
-
-    static CutGraph plain(const AlignmentGraph& g) {
-        CutGraph cg{g.edges, g.node_count(), g.source(), g.sink(), {}};
-        for (uint32_t at = 0; at < g.edges.size(); ++at) cg.origin.push_back(at);
-        return cg;
-    }
 
     // Every node except source and sink is copied once per edge entering it,
     // so a copy knows the symbol that led to it. A Point edge b, or a
@@ -99,7 +125,9 @@ struct CutGraph {
     // becomes two edges in series, the edge itself then Pair(a, b): a path
     // through them is blocked by either, and the cut takes the cheaper.
     // Paths are otherwise those of g, so every cut is still a sound cover.
-    static CutGraph with_pairs(const AlignmentGraph& g, const Frequency& freq) {
+    // `origin`, when given, receives per edge the alignment edge it came from.
+    static CutGraph with_pairs(const AlignmentGraph& g, const Frequency& freq,
+                               std::vector<uint32_t>* origin = nullptr) {
         const size_t needle_len = g.needle_len, edge_count = g.edges.size();
         // The edges into node v, in edge order, are into[start[v] .. start[v + 1]);
         // the copy of node v entered by into[s] is node 1 + s - start[1].
@@ -116,9 +144,8 @@ struct CutGraph {
         auto copy_of = [&](uint32_t s) { return 1 + s - start[1]; };
         uint32_t next = copy_of(start[needle_len]);
         const uint32_t sink = next++;
-        CutGraph cg{{}, 0, 0, sink, {}};
+        CutGraph cg{{}, 0, 0, sink};
         cg.edges.reserve(2 * copies);
-        cg.origin.reserve(2 * copies);
         for (uint32_t at = 0; at < edge_count; ++at) {
             const Edge& e = g.edges[at];
             const uint32_t target = e.to != needle_len ? copy_of(slot[at]) : sink;
@@ -133,7 +160,7 @@ struct CutGraph {
                     copy.from = cu;
                     copy.to = target;
                     cg.edges.push_back(std::move(copy));
-                    cg.origin.push_back(at);
+                    if (origin) origin->push_back(at);
                     continue;
                 }
                 uint32_t mid = next++;
@@ -144,8 +171,7 @@ struct CutGraph {
                 CodePair pair{entered_by->codes[0], e.probe == Probe::Point ? e.codes[0] : e.range.begin};
                 cg.edges.push_back(Edge{mid, target, Probe::Pair, 0, {}, CodeRange{0, 0}, pair, freq.pair_estimate(pair),
                                         0, 0, 1});
-                cg.origin.push_back(at);
-                cg.origin.push_back(at);
+                if (origin) origin->insert(origin->end(), {at, at});
             }
         }
         cg.node_count = next;
@@ -183,18 +209,18 @@ inline Candidates alignment_candidates(const Dictionary& dict, const uint8_t* ne
         size_t len = dict.length(code);
         // The symbol's last alignment_index bytes against needle[..alignment_index].
         for (size_t alignment_index = 1; alignment_index < alignment_count && alignment_index < len; ++alignment_index)
-            if ((((w >> (8 * (len - alignment_index))) ^ key) & low_bytes(alignment_index)) == 0)
+            if (same_prefix(w >> (8 * (len - alignment_index)), key, alignment_index))
                 c.record(alignment_index, static_cast<uint8_t>(code));
         if (anchor == Anchor::End) {
             // the row's last symbol, so it holds the needle as its tail
-            if (len > needle_len && (((w >> (8 * (len - needle_len))) ^ key) & low_bytes(needle_len)) == 0)
+            if (len > needle_len && same_prefix(w >> (8 * (len - needle_len)), key, needle_len))
                 c.contained.push_back(static_cast<uint8_t>(code));
             continue;
         }
         // A symbol starting with the needle is the terminal set's at offset 0.
-        if (len >= needle_len && ((w ^ key) & low_bytes(needle_len)) == 0) continue;
+        if (len >= needle_len && same_prefix(w, key, needle_len)) continue;
         for (size_t p = 1; p + needle_len <= len; ++p)
-            if ((((w >> (8 * p)) ^ key) & low_bytes(needle_len)) == 0) {
+            if (same_prefix(w >> (8 * p), key, needle_len)) {
                 c.contained.push_back(static_cast<uint8_t>(code));
                 break;
             }
@@ -212,8 +238,18 @@ struct Builder {
     const Frequency& freq;
     std::vector<Edge> edges;
     std::vector<bool> built;
+    // first[b] .. first[b + 1]: the codes whose symbol starts with byte b, a
+    // run of the sorted table.
+    std::array<uint16_t, 257> first{};
 
-    void add(uint32_t from, uint32_t to, Probe probe, std::vector<uint8_t> codes, uint8_t byte = 0) {
+    Builder(const Dictionary& dict, const uint8_t* needle, size_t needle_len, Anchor anchor, const Frequency& freq)
+        : dict(dict), needle(needle), needle_len(needle_len), anchor(anchor), freq(freq), built(needle_len, false) {
+        edges.reserve(2 * needle_len + 16);
+        for (size_t c = 0; c < dict.count; ++c) ++first[dict.symbol(c)[0] + 1];
+        for (size_t b = 0; b < 256; ++b) first[b + 1] += first[b];
+    }
+
+    void add(uint32_t from, uint32_t to, Probe probe, EdgeCodes codes, uint8_t byte = 0) {
         // The points and ranges ProbeCover::from_runs would merge the codes into,
         // counted in place: a run is codes each at most one past the one before.
         assert(std::is_sorted(codes.begin(), codes.end()));
@@ -244,14 +280,19 @@ struct Builder {
     // bytes have distinct three-byte prefixes, so at most one can match and
     // the encoder takes it before any shorter one.
     bool greedy(size_t offset, uint8_t& code, size_t& len) const {
-        for (len = std::min(needle_len - offset, MAX_TOKEN_SIZE); len > 0; --len) {
-            size_t c = dict.find(needle + offset, len);
-            if (c < dict.count) {
+        const size_t room = std::min(needle_len - offset, MAX_TOKEN_SIZE);
+        const uint64_t word = load_word(needle + offset, room);
+        const uint8_t lead = needle[offset];
+        len = 0;
+        // only the symbols starting with the needle's byte here can be a prefix of it
+        for (size_t c = first[lead]; c < first[lead + 1]; ++c) {
+            const size_t l = dict.length(c);
+            if (l <= room && l > len && same_prefix(word, dict.word(c), l)) {
                 code = static_cast<uint8_t>(c);
-                return true;
+                len = l;
             }
         }
-        return false;
+        return len > 0;
     }
 
     // The steps out of offset; returns where the parse lands. No symbol
@@ -295,8 +336,7 @@ inline AlignmentGraph build_alignment_graph(const Dictionary& dict, const uint8_
                                             const Frequency& freq, Anchor anchor = Anchor::None) {
     assert(needle_len > 0);
     assert(dict.sorted());
-    detail::Builder b{dict, needle, needle_len, anchor, freq, {}, std::vector<bool>(needle_len, false)};
-    b.edges.reserve(2 * needle_len + 16);
+    detail::Builder b(dict, needle, needle_len, anchor, freq);
     if (anchor == Anchor::Start) {
         // a prefix begins at the row's first byte: the greedy chain from offset 0 is its only layout
         b.ensure_chain(0);

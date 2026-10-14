@@ -31,6 +31,9 @@ inline V load(const uint8_t* at) {
     return v;
 }
 
+// 1 << (lane % 8) per lane of a 16-byte register.
+alignas(16) constexpr uint8_t LANE_BIT[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+
 #if defined(__ARM_NEON)
 
 union Lanes {
@@ -65,8 +68,6 @@ inline bool any(V a, V b) {
 
 // One bit per lane, then three pairwise adds; both words leave in one store.
 inline void movemask(uint64_t* bits, V a, V b) {
-    alignas(16) static const uint8_t LANE_BIT[16] = {1, 2, 4, 8, 16, 32, 64, 128,
-                                                     1, 2, 4, 8, 16, 32, 64, 128};
     const uint8x16_t lane_bit = vld1q_u8(LANE_BIT);
     auto half = [lane_bit](V h) {
         Lanes u{h};
